@@ -2,3 +2,14 @@
 	current-speed = <1000000>;
 	status = "okay";
 };
+
+&pmic_i2c {
+	sda-gpios = <&gpio1 18 GPIO_ACTIVE_HIGH>;
+	scl-gpios = <&gpio1 17 GPIO_ACTIVE_HIGH>;
+};
+
+/ {
+	aliases {
+		regulator-parent = &{/pmic-i2c/npm1300@6b/regulators};
+	};
+};

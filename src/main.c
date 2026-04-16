@@ -4,6 +4,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/flash.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/storage/flash_map.h>
@@ -12,9 +13,12 @@
 
 #define UART_NODE DT_NODELABEL(uart20)
 #define LED_NODE  DT_ALIAS(led0)
+#define REGULATOR_PARENT_NODE DT_ALIAS(regulator_parent)
 
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_NODE);
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
+static const struct device *const regulator_parent =
+	DEVICE_DT_GET_OR_NULL(REGULATOR_PARENT_NODE);
 
 /* ========== Flash Storage Layout ========== */
 /* Use the last page of flash for factory test flags.
@@ -25,6 +29,8 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
  */
 
 #define FACTORY_MAGIC 0xFA51B007
+#define FACTORY_BOOT_FLAG_INDEX 0
+#define FACTORY_BOOT_FLAG_ENTER_FACTORY 2U
 
 /* Persistent data structure stored in flash */
 struct factory_data {
@@ -40,7 +46,7 @@ struct factory_data {
  * The user should define a partition in the overlay for safety.
  */
 #define FACTORY_FLASH_OFFSET 0xFE000 /* Near end of 1MB flash, 8KB before end */
-#define FACTORY_FLASH_SIZE   FLASH_AREA_LABEL_STORAGE_SIZE
+#define FACTORY_FLASH_ERASE_SIZE 0x2000U
 
 static const struct device *flash_dev =
 	DEVICE_DT_GET_OR_NULL(DT_CHOSEN(zephyr_flash_controller));
@@ -69,6 +75,9 @@ struct test_entry {
 static struct test_entry test_registry[MAX_TESTS];
 static uint8_t test_count;
 static struct factory_data fdata;
+static void uart_send_str(const char *str);
+static void uart_send_line(const char *str);
+static void uart_send_uint(uint32_t val);
 
 /* Register a test - called at init */
 static void test_register(const char *name, const char *cmd,
@@ -112,7 +121,7 @@ static bool factory_flash_write(struct factory_data *data)
 
 	/* Erase the page first */
 	int rc = flash_erase(flash_dev, FACTORY_FLASH_OFFSET,
-			     FLASH_AREA_LABEL(storage_SIZE));
+			     FACTORY_FLASH_ERASE_SIZE);
 	if (rc != 0) {
 		return false;
 	}
@@ -145,6 +154,33 @@ static bool factory_load(void)
 static bool factory_save(void)
 {
 	return factory_flash_write(&fdata);
+}
+
+static bool ship_mode_count_inc_and_save(void)
+{
+	if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] < UINT32_MAX) {
+		fdata.reserved[FACTORY_BOOT_FLAG_INDEX]++;
+	}
+
+	uart_send_str("  Boot flag: ");
+	uart_send_uint(fdata.reserved[FACTORY_BOOT_FLAG_INDEX]);
+	uart_send_str("\r\n");
+
+	if (!factory_save()) {
+		uart_send_line("  ERROR:Flash write failed");
+		return false;
+	}
+
+	return true;
+}
+
+static void run_factory_program(void)
+{
+	uart_send_line("Enter factory program mode");
+	while (1) {
+		uart_send_line("hello world");
+		k_msleep(1000);
+	}
 }
 
 /* ========== UART Helpers ========== */
@@ -524,6 +560,44 @@ static bool test_flash(void)
 	return false;
 }
 
+static bool test_shipmode(void)
+{
+	uart_send_line("  [SHIP MODE test]");
+
+	/* Requirement: increment persistent boot flag before ship mode test */
+	if (!ship_mode_count_inc_and_save()) {
+		return false;
+	}
+
+	if (!device_is_ready(regulator_parent)) {
+		uart_send_line("  ERROR:regulator_parent not ready");
+		if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] >=
+		    FACTORY_BOOT_FLAG_ENTER_FACTORY) {
+			run_factory_program();
+		}
+		return false;
+	}
+
+	uart_send_line("  Entering ship mode...");
+	k_busy_wait(10000);
+	int rc = regulator_parent_ship_mode(regulator_parent);
+	if (rc != 0) {
+		uart_send_line("  ERROR:ship mode command failed");
+		if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] >=
+		    FACTORY_BOOT_FLAG_ENTER_FACTORY) {
+			run_factory_program();
+		}
+		return false;
+	}
+
+	if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] >=
+	    FACTORY_BOOT_FLAG_ENTER_FACTORY) {
+		run_factory_program();
+	}
+
+	return true;
+}
+
 /* ========== Register All Tests ========== */
 
 static void tests_init(void)
@@ -539,6 +613,7 @@ static void tests_init(void)
 	test_register("BLE",   "AT+BLE",   test_ble);
 	test_register("NFC",   "AT+NFC",   test_nfc);
 	test_register("FLASH", "AT+FLASH", test_flash);
+	test_register("SHIPMODE", "AT+SHIPMODE", test_shipmode);
 }
 
 /* ========== Main ========== */
@@ -568,6 +643,11 @@ int main(void)
 		memset(&fdata, 0, sizeof(fdata));
 	}
 
+	if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] ==
+	    FACTORY_BOOT_FLAG_ENTER_FACTORY) {
+		run_factory_program();
+	}
+
 	/* Register all tests */
 	tests_init();
 
@@ -590,6 +670,7 @@ int main(void)
 	uart_send_line("  AT+RUNALL   - Run all tests");
 	uart_send_line("  AT+CHECK    - Verify & set pass flag");
 	uart_send_line("  AT+RESET    - Clear all flags");
+	uart_send_line("  AT+SHIPMODE - Ship mode test (+1 boot flag)");
 	uart_send_line("================================");
 
 	/* Main loop - receive and process AT commands */
