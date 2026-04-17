@@ -156,29 +156,26 @@ static bool factory_save(void)
 	return factory_flash_write(&fdata);
 }
 
-static bool ship_mode_count_inc_and_save(void)
-{
-	if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] < UINT32_MAX) {
-		fdata.reserved[FACTORY_BOOT_FLAG_INDEX]++;
-	}
-
-	uart_send_str("  Boot flag: ");
-	uart_send_uint(fdata.reserved[FACTORY_BOOT_FLAG_INDEX]);
-	uart_send_str("\r\n");
-
-	if (!factory_save()) {
-		uart_send_line("  ERROR:Flash write failed");
-		return false;
-	}
-
-	return true;
-}
-
 static void run_factory_program(void)
 {
-	uart_send_line("Enter factory program mode");
+	const struct uart_config factory_uart_cfg = {
+		.baudrate = 115200,
+		.parity = UART_CFG_PARITY_NONE,
+		.stop_bits = UART_CFG_STOP_BITS_1,
+		.data_bits = UART_CFG_DATA_BITS_8,
+		.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
+	};
+
+	/* Keep factory demo output at 115200 baud. */
+	(void)uart_configure(uart_dev, &factory_uart_cfg);
+
 	while (1) {
-		uart_send_line("hello world");
+		gpio_pin_set_dt(&led, 1);
+		uart_send_line("XIAO nRF54LM20A Demo, LED ON");
+		k_msleep(1000);
+
+		gpio_pin_set_dt(&led, 0);
+		uart_send_line("XIAO nRF54LM20A Demo, LED OFF");
 		k_msleep(1000);
 	}
 }
@@ -404,6 +401,22 @@ static void at_handle_runall(void)
 	uart_send_line("OK");
 }
 
+/* AT+FLASH=<0|1|2> - Set factory boot flag directly */
+static void at_handle_flash_set(uint32_t value)
+{
+	fdata.reserved[FACTORY_BOOT_FLAG_INDEX] = value;
+
+	if (!factory_save()) {
+		uart_send_line("ERROR:Flash write failed");
+		return;
+	}
+
+	uart_send_str("FLASH flag set: ");
+	uart_send_uint(value);
+	uart_send_str("\r\n");
+	uart_send_line("OK");
+}
+
 /* ========== AT Command Parser ========== */
 
 static void at_process_command(const char *cmd, uint16_t len)
@@ -451,6 +464,27 @@ static void at_process_command(const char *cmd, uint16_t len)
 	/* AT+RUNALL - Run all tests */
 	if (strncmp(cmd, "AT+RUNALL", 9) == 0) {
 		at_handle_runall();
+		return;
+	}
+
+	/* AT+FLASH=<0|1|2> - Set boot flag directly (single digit only) */
+	if (strncmp(cmd, "AT+FLASH=", 9) == 0) {
+		if (len != 10) {
+			uart_send_line("ERROR:Use AT+FLASH=<0|1|2>");
+			return;
+		}
+
+		if (cmd[9] != '0' && cmd[9] != '1' && cmd[9] != '2') {
+			uart_send_line("ERROR:FLASH value must be 0,1,2");
+			return;
+		}
+
+		at_handle_flash_set((uint32_t)(cmd[9] - '0'));
+		return;
+	}
+
+	if (len == 8 && strncmp(cmd, "AT+FLASH", 8) == 0) {
+		uart_send_line("ERROR:Use AT+FLASH=<0|1|2>");
 		return;
 	}
 
@@ -555,8 +589,8 @@ static bool test_nfc(void)
 
 static bool test_flash(void)
 {
-	/* TODO: Implement Flash test */
-	uart_send_line("  [Flash stub - not implemented]");
+	uart_send_line("  [FLASH test]");
+	uart_send_line("  Use AT+FLASH=<0|1|2>");
 	return false;
 }
 
@@ -564,14 +598,9 @@ static bool test_shipmode(void)
 {
 	uart_send_line("  [SHIP MODE test]");
 
-	/* Requirement: increment persistent boot flag before ship mode test */
-	if (!ship_mode_count_inc_and_save()) {
-		return false;
-	}
-
 	if (!device_is_ready(regulator_parent)) {
 		uart_send_line("  ERROR:regulator_parent not ready");
-		if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] >=
+		if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] ==
 		    FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 			run_factory_program();
 		}
@@ -583,14 +612,14 @@ static bool test_shipmode(void)
 	int rc = regulator_parent_ship_mode(regulator_parent);
 	if (rc != 0) {
 		uart_send_line("  ERROR:ship mode command failed");
-		if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] >=
+		if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] ==
 		    FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 			run_factory_program();
 		}
 		return false;
 	}
 
-	if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] >=
+	if (fdata.reserved[FACTORY_BOOT_FLAG_INDEX] ==
 	    FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 		run_factory_program();
 	}
@@ -661,7 +690,7 @@ int main(void)
 	uart_send_line(loaded ? "Loaded" : "Initialized (new)");
 	uart_send_str("All passed: ");
 	uart_send_line(fdata.all_passed ? "YES" : "NO");
-	uart_send_line("Send AT commands via UART (1Mbaud)");
+	uart_send_line("Send AT commands via UART (115200)");
 	uart_send_line("  AT          - Response OK");
 	uart_send_line("  AT+LIST     - List all tests");
 	uart_send_line("  AT+STATUS   - Show flash status");
@@ -670,7 +699,7 @@ int main(void)
 	uart_send_line("  AT+RUNALL   - Run all tests");
 	uart_send_line("  AT+CHECK    - Verify & set pass flag");
 	uart_send_line("  AT+RESET    - Clear all flags");
-	uart_send_line("  AT+SHIPMODE - Ship mode test (+1 boot flag)");
+	uart_send_line("  AT+SHIPMODE - Ship mode test");
 	uart_send_line("================================");
 
 	/* Main loop - receive and process AT commands */
@@ -682,6 +711,8 @@ int main(void)
 				/* End of command - process it */
 				if (at_buf_len > 0) {
 					at_buf[at_buf_len] = '\0';
+					uart_send_str("RX:");
+					uart_send_line(at_buf);
 					at_process_command(at_buf, at_buf_len);
 					at_buf_len = 0;
 				}
@@ -693,9 +724,10 @@ int main(void)
 				at_buf_len = 0;
 				uart_send_line("ERROR:Buffer overflow");
 			}
+		} else {
+			/* No incoming byte: sleep briefly to reduce CPU usage. */
+			k_usleep(100);
 		}
-
-		k_msleep(2);
 	}
 
 	return 0;
