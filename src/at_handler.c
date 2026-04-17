@@ -64,6 +64,11 @@ static const gpio_pin_t g_gpio_loop_in_pins[] = { 7, 6, 5 };
 static const gpio_pin_t g_nfc_loop_out_pins[] = { 3, 4 };
 static const gpio_pin_t g_nfc_loop_in_pins[] = { 1, 2 };
 
+static const struct gpio_dt_spec g_sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static struct gpio_callback g_sw0_cb_data;
+static bool g_keywake_ready;
+static uint32_t g_keywake_irq_count;
+
 static void uart_send_str(const char *s)
 {
 	while (*s != '\0') {
@@ -370,6 +375,48 @@ static int at_run_gpio_pairs(const struct device *out_port,
 	return 0;
 }
 
+static void at_keywake_irq_cb(const struct device *port,
+			      struct gpio_callback *cb, uint32_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+	g_keywake_irq_count++;
+}
+
+static int at_keywake_ensure_ready(void)
+{
+	int rc;
+
+	if (g_keywake_ready) {
+		return 0;
+	}
+
+	if (!gpio_is_ready_dt(&g_sw0)) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_configure_dt(&g_sw0, GPIO_INPUT);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	gpio_init_callback(&g_sw0_cb_data, at_keywake_irq_cb, BIT(g_sw0.pin));
+	rc = gpio_add_callback(g_sw0.port, &g_sw0_cb_data);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_interrupt_configure_dt(&g_sw0, GPIO_INT_EDGE_BOTH);
+	if (rc != 0) {
+		(void)gpio_remove_callback(g_sw0.port, &g_sw0_cb_data);
+		return -ENODEV;
+	}
+
+	g_keywake_ready = true;
+	return 0;
+}
+
 static int at_handle_chgcur(void)
 {
 	return at_handle_not_implemented("STATE2", "CHGCUR", "err:SENSOR_NOT_READY");
@@ -446,7 +493,32 @@ static int at_handle_sleepi(void)
 
 static int at_handle_keywake(void)
 {
-	return at_handle_not_implemented("STATE6", "KEYWAKE", "err:KEY_PATH_TBD");
+	int level;
+	int rc;
+
+	rc = at_keywake_ensure_ready();
+	if (rc != 0) {
+		emit_testdata("STATE6", "KEYWAKE", "0", "bool", "sw0_not_ready",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	level = gpio_pin_get_dt(&g_sw0);
+	if (level < 0) {
+		emit_testdata("STATE6", "KEYWAKE", "0", "bool", "sw0_read_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	uart_send_str("+TESTDATA:STATE6,ITEM=KEYWAKE,VALUE=");
+	uart_send_u32((uint32_t)level);
+	uart_send_str(",UNIT=bool,RAW=");
+	uart_send_u32(g_keywake_irq_count);
+	uart_send_str(",META=alias:sw0;irq_count=");
+	uart_send_u32(g_keywake_irq_count);
+	uart_send_line("");
+
+	return 0;
 }
 
 static int at_handle_flashwrite(void)
@@ -818,6 +890,8 @@ void at_handler_init(const struct device *uart_dev,
 	g_ctx.regulator_parent = regulator_parent;
 	g_ctx.persist = persist;
 	g_adc_initialized = false;
+	g_keywake_ready = false;
+	g_keywake_irq_count = 0;
 }
 
 void at_handler_process_line(const char *line, size_t len)
