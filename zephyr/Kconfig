@@ -1,0 +1,40 @@
+source "Kconfig.zephyr"
+
+menu "Factory AT Parameters"
+
+config FACTORY_VBUS_USB_MIN_MV
+	int "State1 USB VBUS reference threshold (mV)"
+	range 0 10000
+	default 4900
+	help
+	  Host-side reference threshold for State1 VBUS checks.
+
+config FACTORY_3V3_MIN_MV
+	int "State1/8B 3V3 reference threshold (mV)"
+	range 0 5000
+	default 3200
+	help
+	  Host-side reference threshold for 3V3 checks.
+
+config FACTORY_VBUS_BAT_MAX_MV
+	int "PhaseB-State8 VBUS reference threshold (mV)"
+	range 0 5000
+	default 500
+	help
+	  Host-side reference threshold for battery-only VBUS recheck.
+
+config FACTORY_ADC_VBUS_CHANNEL
+	int "ADC channel index for VBUS sampling"
+	range 0 7
+	default 0
+	help
+	  Maps VBUS sampling to zephyr,user io-channels index.
+
+config FACTORY_ADC_3V3_CHANNEL
+	int "ADC channel index for 3V3 sampling"
+	range 0 7
+	default 1
+	help
+	  Maps 3V3 sampling to zephyr,user io-channels index.
+
+endmenu

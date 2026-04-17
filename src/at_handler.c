@@ -5,12 +5,36 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 
 #include "factory_storage.h"
+
+#ifndef CONFIG_FACTORY_VBUS_USB_MIN_MV
+#define CONFIG_FACTORY_VBUS_USB_MIN_MV 4900
+#endif
+
+#ifndef CONFIG_FACTORY_3V3_MIN_MV
+#define CONFIG_FACTORY_3V3_MIN_MV 3200
+#endif
+
+#ifndef CONFIG_FACTORY_VBUS_BAT_MAX_MV
+#define CONFIG_FACTORY_VBUS_BAT_MAX_MV 500
+#endif
+
+#ifndef CONFIG_FACTORY_ADC_VBUS_CHANNEL
+#define CONFIG_FACTORY_ADC_VBUS_CHANNEL 0
+#endif
+
+#ifndef CONFIG_FACTORY_ADC_3V3_CHANNEL
+#define CONFIG_FACTORY_ADC_3V3_CHANNEL 1
+#endif
+
+#define FACTORY_ADC_CHANNEL_COUNT 8
+#define ADC_NODE DT_PATH(zephyr_user)
 
 struct at_ctx {
 	const struct device *uart;
@@ -19,6 +43,19 @@ struct at_ctx {
 };
 
 static struct at_ctx g_ctx;
+
+static const struct adc_dt_spec g_adc_channels[] = {
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 0),
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 1),
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 2),
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 3),
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 4),
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 5),
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 6),
+	ADC_DT_SPEC_GET_BY_IDX(ADC_NODE, 7),
+};
+
+static bool g_adc_initialized;
 
 static void uart_send_str(const char *s)
 {
@@ -53,6 +90,17 @@ static void uart_send_u32(uint32_t value)
 	}
 }
 
+static void uart_send_s32(int32_t value)
+{
+	if (value < 0) {
+		uart_poll_out(g_ctx.uart, '-');
+		uart_send_u32((uint32_t)(-(int64_t)value));
+		return;
+	}
+
+	uart_send_u32((uint32_t)value);
+}
+
 static void emit_testdata(const char *state, const char *item,
 			  const char *value, const char *unit,
 			  const char *raw, const char *meta)
@@ -69,6 +117,37 @@ static void emit_testdata(const char *state, const char *item,
 	uart_send_str(raw);
 	uart_send_str(",META=");
 	uart_send_line(meta);
+}
+
+static void emit_testdata_cfg_u32(const char *item, uint32_t value,
+				  const char *unit, const char *meta)
+{
+	uart_send_str("+TESTDATA:CFG,ITEM=");
+	uart_send_str(item);
+	uart_send_str(",VALUE=");
+	uart_send_u32(value);
+	uart_send_str(",UNIT=");
+	uart_send_str(unit);
+	uart_send_str(",RAW=kconfig,META=");
+	uart_send_line(meta);
+}
+
+static void emit_testdata_adc(const char *state, const char *item, int32_t mv,
+			      int16_t raw, uint32_t ref_mv, uint8_t channel)
+{
+	uart_send_str("+TESTDATA:");
+	uart_send_str(state);
+	uart_send_str(",ITEM=");
+	uart_send_str(item);
+	uart_send_str(",VALUE=");
+	uart_send_s32(mv);
+	uart_send_str(",UNIT=mV,RAW=");
+	uart_send_s32((int32_t)raw);
+	uart_send_str(",META=ch:");
+	uart_send_u32(channel);
+	uart_send_str(";ref_mv:");
+	uart_send_u32(ref_mv);
+	uart_send_line("");
 }
 
 static const char *error_reason_from_rc(int rc)
@@ -111,14 +190,99 @@ static int at_handle_not_implemented(const char *state, const char *item,
 	return -ENOSYS;
 }
 
+static int at_adc_ensure_ready(void)
+{
+	int rc;
+
+	if (g_adc_initialized) {
+		return 0;
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(g_adc_channels); ++i) {
+		if (!adc_is_ready_dt(&g_adc_channels[i])) {
+			return -ENODEV;
+		}
+
+		rc = adc_channel_setup_dt(&g_adc_channels[i]);
+		if (rc != 0) {
+			return -ENODEV;
+		}
+	}
+
+	g_adc_initialized = true;
+	return 0;
+}
+
+static int at_adc_sample_mv(uint8_t channel_idx, int32_t *mv, int16_t *raw)
+{
+	struct adc_sequence sequence = {
+		.buffer = raw,
+		.buffer_size = sizeof(*raw),
+	};
+	int32_t mv_tmp;
+	int rc;
+
+	if (mv == NULL || raw == NULL || channel_idx >= ARRAY_SIZE(g_adc_channels)) {
+		return -EINVAL;
+	}
+
+	rc = at_adc_ensure_ready();
+	if (rc != 0) {
+		return rc;
+	}
+
+	(void)adc_sequence_init_dt(&g_adc_channels[channel_idx], &sequence);
+	rc = adc_read_dt(&g_adc_channels[channel_idx], &sequence);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	mv_tmp = *raw;
+	rc = adc_raw_to_millivolts_dt(&g_adc_channels[channel_idx], &mv_tmp);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	*mv = mv_tmp;
+	return 0;
+}
+
 static int at_handle_vbus(void)
 {
-	return at_handle_not_implemented("STATE1", "VBUS", "err:ADC_NOT_READY");
+	int32_t mv;
+	int16_t raw;
+	int rc;
+
+	rc = at_adc_sample_mv((uint8_t)CONFIG_FACTORY_ADC_VBUS_CHANNEL, &mv, &raw);
+	if (rc != 0) {
+		emit_testdata("STATE1", "VBUS", "0", "mV", "adc_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	emit_testdata_adc("STATE1", "VBUS", mv, raw,
+			 CONFIG_FACTORY_VBUS_USB_MIN_MV,
+			 (uint8_t)CONFIG_FACTORY_ADC_VBUS_CHANNEL);
+	return 0;
 }
 
 static int at_handle_v3p3(void)
 {
-	return at_handle_not_implemented("STATE1", "3V3", "err:ADC_NOT_READY");
+	int32_t mv;
+	int16_t raw;
+	int rc;
+
+	rc = at_adc_sample_mv((uint8_t)CONFIG_FACTORY_ADC_3V3_CHANNEL, &mv, &raw);
+	if (rc != 0) {
+		emit_testdata("STATE1", "3V3", "0", "mV", "adc_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	emit_testdata_adc("STATE1", "3V3", mv, raw,
+			 CONFIG_FACTORY_3V3_MIN_MV,
+			 (uint8_t)CONFIG_FACTORY_ADC_3V3_CHANNEL);
+	return 0;
 }
 
 static int at_handle_uartloop(void)
@@ -239,12 +403,40 @@ static int at_handle_shipmode_a(void)
 
 static int at_handle_vbus_b(void)
 {
-	return at_handle_not_implemented("STATE8B", "VBUS_B", "err:ADC_NOT_READY");
+	int32_t mv;
+	int16_t raw;
+	int rc;
+
+	rc = at_adc_sample_mv((uint8_t)CONFIG_FACTORY_ADC_VBUS_CHANNEL, &mv, &raw);
+	if (rc != 0) {
+		emit_testdata("STATE8B", "VBUS_B", "0", "mV", "adc_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	emit_testdata_adc("STATE8B", "VBUS_B", mv, raw,
+			 CONFIG_FACTORY_VBUS_BAT_MAX_MV,
+			 (uint8_t)CONFIG_FACTORY_ADC_VBUS_CHANNEL);
+	return 0;
 }
 
 static int at_handle_v3p3_b(void)
 {
-	return at_handle_not_implemented("STATE8B", "3V3_B", "err:ADC_NOT_READY");
+	int32_t mv;
+	int16_t raw;
+	int rc;
+
+	rc = at_adc_sample_mv((uint8_t)CONFIG_FACTORY_ADC_3V3_CHANNEL, &mv, &raw);
+	if (rc != 0) {
+		emit_testdata("STATE8B", "3V3_B", "0", "mV", "adc_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	emit_testdata_adc("STATE8B", "3V3_B", mv, raw,
+			 CONFIG_FACTORY_3V3_MIN_MV,
+			 (uint8_t)CONFIG_FACTORY_ADC_3V3_CHANNEL);
+	return 0;
 }
 
 static int at_handle_shipmode_b(void)
@@ -415,7 +607,7 @@ static const struct at_cmd g_state_cmds[] = {
 
 static int at_handle_help(void)
 {
-	uart_send_line("+CMDS:AT,AT+HELP,AT+FLASH?,AT+FLASH=<0|1|2>");
+	uart_send_line("+CMDS:AT,AT+HELP,AT+FLASH?,AT+FLASH=<0|1|2>,AT+THRESH?");
 	uart_send_line("+CMDS:AT+STATE1..AT+STATE7,AT+STATE8A,AT+STATE8B,AT+STATE9B");
 	uart_send_line("+CMDS:AT+VBUS,AT+V3P3,AT+UARTLOOP,AT+CHGCUR,AT+BATV");
 	uart_send_line("+CMDS:AT+BLESCAN,AT+GPIOLOOP,AT+NFCLOOP,AT+IMU6D,AT+MICAMP");
@@ -467,6 +659,21 @@ static int at_handle_flash_set(const char *arg)
 	return 0;
 }
 
+static int at_handle_thresh_get(void)
+{
+	emit_testdata_cfg_u32("VBUS_USB_MIN_MV", CONFIG_FACTORY_VBUS_USB_MIN_MV,
+			     "mV", "state:STATE1,item:VBUS");
+	emit_testdata_cfg_u32("3V3_MIN_MV", CONFIG_FACTORY_3V3_MIN_MV,
+			     "mV", "state:STATE1|STATE8B,item:3V3");
+	emit_testdata_cfg_u32("VBUS_BAT_MAX_MV", CONFIG_FACTORY_VBUS_BAT_MAX_MV,
+			     "mV", "state:STATE8B,item:VBUS_B");
+	emit_testdata_cfg_u32("ADC_VBUS_CHANNEL", CONFIG_FACTORY_ADC_VBUS_CHANNEL,
+			     "idx", "source:zephyr_user.io-channels");
+	emit_testdata_cfg_u32("ADC_3V3_CHANNEL", CONFIG_FACTORY_ADC_3V3_CHANNEL,
+			     "idx", "source:zephyr_user.io-channels");
+	return 0;
+}
+
 static bool at_cmd_equals(const char *trimmed, size_t trimmed_len,
 			 const char *cmd)
 {
@@ -504,6 +711,7 @@ void at_handler_init(const struct device *uart_dev,
 	g_ctx.uart = uart_dev;
 	g_ctx.regulator_parent = regulator_parent;
 	g_ctx.persist = persist;
+	g_adc_initialized = false;
 }
 
 void at_handler_process_line(const char *line, size_t len)
@@ -542,6 +750,12 @@ void at_handler_process_line(const char *line, size_t len)
 
 	if (at_cmd_equals(trimmed, trimmed_len, "AT+FLASH?")) {
 		rc = at_handle_flash_get();
+		emit_final_status(rc);
+		return;
+	}
+
+	if (at_cmd_equals(trimmed, trimmed_len, "AT+THRESH?")) {
+		rc = at_handle_thresh_get();
 		emit_final_status(rc);
 		return;
 	}
