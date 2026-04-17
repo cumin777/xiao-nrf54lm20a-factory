@@ -1,4 +1,4 @@
-&uart20 {
+&uart21 {
 	current-speed = <115200>;
 	status = "okay";
 };

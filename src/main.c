@@ -11,7 +11,7 @@
 
 /* ========== UART Configuration ========== */
 
-#define UART_NODE DT_NODELABEL(uart20)
+#define UART_NODE DT_NODELABEL(uart21)
 #define LED_NODE  DT_ALIAS(led0)
 #define REGULATOR_PARENT_NODE DT_ALIAS(regulator_parent)
 
