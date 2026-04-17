@@ -16,5 +16,12 @@
 	zephyr,user {
 		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
 			      <&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
+		/* GPIO loop pairs: D11->D18, D12->D17, D13->D16 */
+		gpio-loop-gpios = <&gpio3 0 GPIO_ACTIVE_HIGH>, <&gpio3 7 GPIO_ACTIVE_HIGH>,
+				  <&gpio3 1 GPIO_ACTIVE_HIGH>, <&gpio3 6 GPIO_ACTIVE_HIGH>,
+				  <&gpio3 2 GPIO_ACTIVE_HIGH>, <&gpio3 5 GPIO_ACTIVE_HIGH>;
+		/* NFC loop pairs: D14->NFC1, D15->NFC2 */
+		nfc-loop-gpios = <&gpio3 3 GPIO_ACTIVE_HIGH>, <&gpio3 4 GPIO_ACTIVE_HIGH>,
+				 <&gpio1 1 GPIO_ACTIVE_HIGH>, <&gpio1 2 GPIO_ACTIVE_HIGH>;
 	};
 };

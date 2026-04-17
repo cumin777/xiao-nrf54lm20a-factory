@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
@@ -34,7 +35,8 @@
 #endif
 
 #define FACTORY_ADC_CHANNEL_COUNT 8
-#define ADC_NODE DT_PATH(zephyr_user)
+#define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
+#define ADC_NODE ZEPHYR_USER_NODE
 
 struct at_ctx {
 	const struct device *uart;
@@ -56,6 +58,11 @@ static const struct adc_dt_spec g_adc_channels[] = {
 };
 
 static bool g_adc_initialized;
+
+static const gpio_pin_t g_gpio_loop_out_pins[] = { 0, 1, 2 };
+static const gpio_pin_t g_gpio_loop_in_pins[] = { 7, 6, 5 };
+static const gpio_pin_t g_nfc_loop_out_pins[] = { 3, 4 };
+static const gpio_pin_t g_nfc_loop_in_pins[] = { 1, 2 };
 
 static void uart_send_str(const char *s)
 {
@@ -148,6 +155,22 @@ static void emit_testdata_adc(const char *state, const char *item, int32_t mv,
 	uart_send_str(";ref_mv:");
 	uart_send_u32(ref_mv);
 	uart_send_line("");
+}
+
+static void emit_testdata_bits(const char *state, const char *item,
+			       uint32_t hit_count, uint32_t raw_mask,
+			       const char *meta)
+{
+	uart_send_str("+TESTDATA:");
+	uart_send_str(state);
+	uart_send_str(",ITEM=");
+	uart_send_str(item);
+	uart_send_str(",VALUE=");
+	uart_send_u32(hit_count);
+	uart_send_str(",UNIT=bits,RAW=");
+	uart_send_u32(raw_mask);
+	uart_send_str(",META=");
+	uart_send_line(meta);
 }
 
 static const char *error_reason_from_rc(int rc)
@@ -298,6 +321,55 @@ static int at_handle_uartloop(void)
 	return 0;
 }
 
+static int at_run_gpio_pairs(const struct device *out_port,
+			     const gpio_pin_t *out_pins,
+			     const struct device *in_port,
+			     const gpio_pin_t *in_pins,
+			     size_t count, uint32_t *raw_mask)
+{
+	if (out_port == NULL || in_port == NULL || out_pins == NULL ||
+	    in_pins == NULL || raw_mask == NULL || count == 0) {
+		return -EINVAL;
+	}
+
+	if (!device_is_ready(out_port) || !device_is_ready(in_port)) {
+		return -ENODEV;
+	}
+
+	*raw_mask = 0;
+
+	for (size_t i = 0; i < count; ++i) {
+		if (gpio_pin_configure(out_port, out_pins[i], GPIO_OUTPUT_INACTIVE) != 0) {
+			return -ENODEV;
+		}
+
+		if (gpio_pin_configure(in_port, in_pins[i], GPIO_INPUT) != 0) {
+			return -ENODEV;
+		}
+	}
+
+	k_usleep(100);
+
+	for (size_t i = 0; i < count; ++i) {
+		int sampled;
+
+		(void)gpio_pin_set(out_port, out_pins[i], 1);
+		k_usleep(200);
+		sampled = gpio_pin_get(in_port, in_pins[i]);
+		(void)gpio_pin_set(out_port, out_pins[i], 0);
+
+		if (sampled < 0) {
+			return -ENODEV;
+		}
+
+		if (sampled > 0) {
+			*raw_mask |= BIT(i);
+		}
+	}
+
+	return 0;
+}
+
 static int at_handle_chgcur(void)
 {
 	return at_handle_not_implemented("STATE2", "CHGCUR", "err:SENSOR_NOT_READY");
@@ -315,12 +387,46 @@ static int at_handle_blescan(void)
 
 static int at_handle_gpioloop(void)
 {
-	return at_handle_not_implemented("STATE3", "GPIOLOOP", "err:GPIO_LOOPBACK_TBD");
+	const struct device *const gpio3 =
+		DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio3));
+	uint32_t raw_mask;
+	int rc;
+
+	rc = at_run_gpio_pairs(gpio3, g_gpio_loop_out_pins,
+			       gpio3, g_gpio_loop_in_pins,
+			       ARRAY_SIZE(g_gpio_loop_out_pins), &raw_mask);
+	if (rc != 0) {
+		emit_testdata("STATE3", "GPIOLOOP", "0", "bits", "gpio_loop_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	emit_testdata_bits("STATE3", "GPIOLOOP", POPCOUNT(raw_mask), raw_mask,
+			   "map:D11->D18;D12->D17;D13->D16");
+	return 0;
 }
 
 static int at_handle_nfcloop(void)
 {
-	return at_handle_not_implemented("STATE3", "NFCLOOP", "err:NFC_NOT_READY");
+	const struct device *const gpio3 =
+		DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio3));
+	const struct device *const gpio1 =
+		DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio1));
+	uint32_t raw_mask;
+	int rc;
+
+	rc = at_run_gpio_pairs(gpio3, g_nfc_loop_out_pins,
+			       gpio1, g_nfc_loop_in_pins,
+			       ARRAY_SIZE(g_nfc_loop_out_pins), &raw_mask);
+	if (rc != 0) {
+		emit_testdata("STATE3", "NFCLOOP", "0", "bits", "nfc_loop_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	emit_testdata_bits("STATE3", "NFCLOOP", POPCOUNT(raw_mask), raw_mask,
+			   "map:D14->NFC1;D15->NFC2");
+	return 0;
 }
 
 static int at_handle_imu6d(void)
