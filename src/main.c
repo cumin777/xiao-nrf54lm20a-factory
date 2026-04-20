@@ -100,6 +100,7 @@ int main(void)
 		if (uart_poll_in(uart_dev, &ch) == 0) {
 			if (ch == '\r' || ch == '\n') {
 				if (at_len > 0) {
+					at_buf[at_len] = '\0';
 					at_handler_process_line(at_buf, at_len);
 					at_len = 0;
 				}
