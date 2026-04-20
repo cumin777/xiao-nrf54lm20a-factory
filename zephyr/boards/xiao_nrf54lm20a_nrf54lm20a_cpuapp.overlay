@@ -13,6 +13,10 @@
 		regulator-parent = &{/pmic-i2c/npm1300@6b/regulators};
 	};
 
+	chosen {
+		zephyr,bt-hci = &bt_hci_controller;
+	};
+
 	zephyr,user {
 		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
 			      <&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
@@ -24,4 +28,12 @@
 		nfc-loop-gpios = <&gpio3 3 GPIO_ACTIVE_HIGH>, <&gpio3 4 GPIO_ACTIVE_HIGH>,
 				 <&gpio1 1 GPIO_ACTIVE_HIGH>, <&gpio1 2 GPIO_ACTIVE_HIGH>;
 	};
+};
+
+&bt_hci_controller {
+	status = "okay";
+};
+
+&bt_hci_sdc {
+	status = "disabled";
 };

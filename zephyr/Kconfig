@@ -72,6 +72,20 @@ config FACTORY_SLEEPI_REF_UA
 	help
 	  Host-side reference current for SLEEPI checks (firmware does not judge PASS/FAIL).
 
+config FACTORY_BLE_SCAN_WINDOW_MS
+	int "State3 BLE scan window (ms)"
+	range 100 10000
+	default 1500
+	help
+	  Active scan duration used by AT+BLESCAN.
+
+config FACTORY_BLE_RSSI_REF_DBM
+	int "State3 BLE RSSI reference (dBm)"
+	range -127 20
+	default -70
+	help
+	  Host-side reference RSSI for BLESCAN (firmware does not judge PASS/FAIL).
+
 config FACTORY_DMIC_SAMPLE_RATE_HZ
 	int "DMIC sample rate (Hz)"
 	range 8000 48000

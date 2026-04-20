@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <zephyr/audio/dmic.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/hci.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/regulator.h>
@@ -55,6 +57,14 @@
 
 #ifndef CONFIG_FACTORY_SLEEPI_REF_UA
 #define CONFIG_FACTORY_SLEEPI_REF_UA 0
+#endif
+
+#ifndef CONFIG_FACTORY_BLE_SCAN_WINDOW_MS
+#define CONFIG_FACTORY_BLE_SCAN_WINDOW_MS 1500
+#endif
+
+#ifndef CONFIG_FACTORY_BLE_RSSI_REF_DBM
+#define CONFIG_FACTORY_BLE_RSSI_REF_DBM -70
 #endif
 
 #ifndef CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ
@@ -133,6 +143,21 @@ static const struct device *const g_pmic_charger_dev =
 	DEVICE_DT_GET(DT_NODELABEL(pmic_charger));
 #endif
 
+#if defined(CONFIG_BT)
+struct ble_scan_stats {
+	bool have_first;
+	bool have_best;
+	uint32_t adv_count;
+	int8_t first_rssi;
+	int8_t best_rssi;
+	bt_addr_le_t first_addr;
+	bt_addr_le_t best_addr;
+};
+
+static bool g_ble_initialized;
+static struct ble_scan_stats g_ble_scan_stats;
+#endif
+
 static void uart_send_str(const char *s)
 {
 	while (*s != '\0') {
@@ -202,6 +227,19 @@ static void emit_testdata_cfg_u32(const char *item, uint32_t value,
 	uart_send_str(item);
 	uart_send_str(",VALUE=");
 	uart_send_u32(value);
+	uart_send_str(",UNIT=");
+	uart_send_str(unit);
+	uart_send_str(",RAW=kconfig,META=");
+	uart_send_line(meta);
+}
+
+static void emit_testdata_cfg_s32(const char *item, int32_t value,
+				  const char *unit, const char *meta)
+{
+	uart_send_str("+TESTDATA:CFG,ITEM=");
+	uart_send_str(item);
+	uart_send_str(",VALUE=");
+	uart_send_s32(value);
 	uart_send_str(",UNIT=");
 	uart_send_str(unit);
 	uart_send_str(",RAW=kconfig,META=");
@@ -644,9 +682,128 @@ static int at_handle_batv(void)
 	return 0;
 }
 
+static int at_ble_ensure_ready(void)
+{
+#if defined(CONFIG_BT)
+	int rc;
+
+	if (g_ble_initialized) {
+		return 0;
+	}
+
+	rc = bt_enable(NULL);
+	if (rc < 0 && rc != -EALREADY) {
+		return -ENODEV;
+	}
+
+	g_ble_initialized = true;
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+#if defined(CONFIG_BT)
+static bool at_ble_adv_type_supported(uint8_t type)
+{
+	return (type == BT_GAP_ADV_TYPE_ADV_IND) ||
+	       (type == BT_GAP_ADV_TYPE_ADV_DIRECT_IND) ||
+	       (type == BT_GAP_ADV_TYPE_ADV_SCAN_IND) ||
+	       (type == BT_GAP_ADV_TYPE_SCAN_RSP);
+}
+
+static void at_ble_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
+			   struct net_buf_simple *ad)
+{
+	ARG_UNUSED(ad);
+
+	if (!at_ble_adv_type_supported(type)) {
+		return;
+	}
+
+	g_ble_scan_stats.adv_count++;
+
+	if (!g_ble_scan_stats.have_first) {
+		g_ble_scan_stats.have_first = true;
+		g_ble_scan_stats.first_rssi = rssi;
+		bt_addr_le_copy(&g_ble_scan_stats.first_addr, addr);
+	}
+
+	if (!g_ble_scan_stats.have_best || rssi > g_ble_scan_stats.best_rssi) {
+		g_ble_scan_stats.have_best = true;
+		g_ble_scan_stats.best_rssi = rssi;
+		bt_addr_le_copy(&g_ble_scan_stats.best_addr, addr);
+	}
+}
+#endif
+
 static int at_handle_blescan(void)
 {
-	return at_handle_not_implemented("STATE3", "BLESCAN", "err:BLE_NOT_READY");
+#if defined(CONFIG_BT)
+	struct bt_le_scan_param scan_param = {
+		.type = BT_LE_SCAN_TYPE_ACTIVE,
+		.options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+		.interval = BT_GAP_SCAN_FAST_INTERVAL,
+		.window = BT_GAP_SCAN_FAST_WINDOW,
+	};
+	char first_addr[BT_ADDR_LE_STR_LEN] = "none";
+	char best_addr[BT_ADDR_LE_STR_LEN] = "none";
+	int rc;
+	int stop_rc;
+	int32_t best_rssi = -127;
+
+	rc = at_ble_ensure_ready();
+	if (rc != 0) {
+		emit_testdata("STATE3", "BLESCAN", "0", "adv", "bt_init_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	memset(&g_ble_scan_stats, 0, sizeof(g_ble_scan_stats));
+	rc = bt_le_scan_start(&scan_param, at_ble_scan_cb);
+	if (rc != 0 && rc != -EALREADY) {
+		emit_testdata("STATE3", "BLESCAN", "0", "adv", "scan_start_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	k_msleep(CONFIG_FACTORY_BLE_SCAN_WINDOW_MS);
+	stop_rc = bt_le_scan_stop();
+	if (stop_rc != 0 && stop_rc != -EALREADY) {
+		emit_testdata("STATE3", "BLESCAN", "0", "adv", "scan_stop_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	if (g_ble_scan_stats.have_first) {
+		bt_addr_le_to_str(&g_ble_scan_stats.first_addr, first_addr,
+				  sizeof(first_addr));
+	}
+	if (g_ble_scan_stats.have_best) {
+		best_rssi = g_ble_scan_stats.best_rssi;
+		bt_addr_le_to_str(&g_ble_scan_stats.best_addr, best_addr,
+				  sizeof(best_addr));
+	}
+
+	uart_send_str("+TESTDATA:STATE3,ITEM=BLESCAN,VALUE=");
+	uart_send_u32(g_ble_scan_stats.adv_count);
+	uart_send_str(",UNIT=adv,RAW=");
+	uart_send_s32(best_rssi);
+	uart_send_str(",META=first:");
+	uart_send_str(first_addr);
+	uart_send_str(";best:");
+	uart_send_str(best_addr);
+	uart_send_str(";window_ms:");
+	uart_send_u32(CONFIG_FACTORY_BLE_SCAN_WINDOW_MS);
+	uart_send_str(";ref_rssi_dbm:");
+	uart_send_s32(CONFIG_FACTORY_BLE_RSSI_REF_DBM);
+	uart_send_line(";mode:active_scan");
+	return 0;
+#else
+	emit_testdata("STATE3", "BLESCAN", "0", "adv", "bt_not_enabled",
+		      "err:HW_NOT_READY");
+	return -ENODEV;
+#endif
 }
 
 static int at_handle_gpioloop(void)
@@ -1251,6 +1408,10 @@ static int at_handle_thresh_get(void)
 			     "ms", "state:STATE5,item:SLEEPI");
 	emit_testdata_cfg_u32("SLEEPI_REF_UA", CONFIG_FACTORY_SLEEPI_REF_UA,
 			     "uA", "state:STATE5,item:SLEEPI");
+	emit_testdata_cfg_u32("BLE_SCAN_WINDOW_MS", CONFIG_FACTORY_BLE_SCAN_WINDOW_MS,
+			     "ms", "state:STATE3,item:BLESCAN");
+	emit_testdata_cfg_s32("BLE_RSSI_REF_DBM", CONFIG_FACTORY_BLE_RSSI_REF_DBM,
+			     "dBm", "state:STATE3,item:BLESCAN");
 	return 0;
 }
 
