@@ -8,6 +8,7 @@
 #include <zephyr/audio/dmic.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
+#include <zephyr/device.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/regulator.h>
@@ -536,8 +537,116 @@ static int at_enable_imu_power(void)
 	}
 #endif
 
-	k_sleep(K_MSEC(10));
+	k_sleep(K_MSEC(20));
 	return 0;
+}
+
+static int at_ensure_imu_ready(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	int ret;
+
+	ret = at_enable_imu_power();
+	if (ret != 0) {
+		return ret;
+	}
+
+	if (!device_is_ready(g_imu_dev)) {
+		ret = device_init(g_imu_dev);
+		if (ret < 0 && ret != -EALREADY) {
+			return ret;
+		}
+	}
+
+	if (!device_is_ready(g_imu_dev)) {
+		return -ENODEV;
+	}
+
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int at_fetch_imu_sample(struct sensor_value *accel_x,
+			       struct sensor_value *accel_y,
+			       struct sensor_value *accel_z,
+			       struct sensor_value *gyro_x,
+			       struct sensor_value *gyro_y,
+			       struct sensor_value *gyro_z)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	struct sensor_value odr_attr = {
+		.val1 = 26,
+		.val2 = 0,
+	};
+	int ret;
+
+	ret = sensor_attr_set(g_imu_dev, SENSOR_CHAN_ACCEL_XYZ,
+			      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_attr_set(g_imu_dev, SENSOR_CHAN_GYRO_XYZ,
+			      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
+	if (ret != 0) {
+		return ret;
+	}
+
+	/* Wait one ODR period so the first single-shot read is not a stale zero frame. */
+	k_sleep(K_MSEC(40));
+
+	ret = sensor_sample_fetch_chan(g_imu_dev, SENSOR_CHAN_ACCEL_XYZ);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_X, accel_x);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Y, accel_y);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Z, accel_z);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_sample_fetch_chan(g_imu_dev, SENSOR_CHAN_GYRO_XYZ);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_X, gyro_x);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Y, gyro_y);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Z, gyro_z);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return 0;
+#else
+	ARG_UNUSED(accel_x);
+	ARG_UNUSED(accel_y);
+	ARG_UNUSED(accel_z);
+	ARG_UNUSED(gyro_x);
+	ARG_UNUSED(gyro_y);
+	ARG_UNUSED(gyro_z);
+	return -ENODEV;
+#endif
 }
 
 static int at_enable_dmic_power(void)
@@ -848,48 +957,19 @@ static int at_handle_imu6d(void)
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
 	struct sensor_value accel_x, accel_y, accel_z;
 	struct sensor_value gyro_x, gyro_y, gyro_z;
-	struct sensor_value odr_attr;
 	int rc;
 
-	rc = at_enable_imu_power();
-	if (rc != 0 || !device_is_ready(g_imu_dev)) {
+	rc = at_ensure_imu_ready();
+	if (rc != 0) {
 		emit_testdata("STATE4", "IMU6D", "0", "sample", "imu_not_ready",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
-	odr_attr.val1 = 26;
-	odr_attr.val2 = 0;
-	rc = sensor_attr_set(g_imu_dev, SENSOR_CHAN_ACCEL_XYZ,
-			     SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
+	rc = at_fetch_imu_sample(&accel_x, &accel_y, &accel_z,
+				 &gyro_x, &gyro_y, &gyro_z);
 	if (rc != 0) {
-		emit_testdata("STATE4", "IMU6D", "0", "sample", "accel_odr_set_failed",
-			      "err:HW_NOT_READY");
-		return -ENODEV;
-	}
-
-	rc = sensor_attr_set(g_imu_dev, SENSOR_CHAN_GYRO_XYZ,
-			     SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
-	if (rc != 0) {
-		emit_testdata("STATE4", "IMU6D", "0", "sample", "gyro_odr_set_failed",
-			      "err:HW_NOT_READY");
-		return -ENODEV;
-	}
-
-	rc = sensor_sample_fetch(g_imu_dev);
-	if (rc != 0) {
-		emit_testdata("STATE4", "IMU6D", "0", "sample", "fetch_failed",
-			      "err:HW_NOT_READY");
-		return -ENODEV;
-	}
-
-	if (sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_X, &accel_x) != 0 ||
-	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Y, &accel_y) != 0 ||
-	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Z, &accel_z) != 0 ||
-	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_X, &gyro_x) != 0 ||
-	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Y, &gyro_y) != 0 ||
-	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Z, &gyro_z) != 0) {
-		emit_testdata("STATE4", "IMU6D", "0", "sample", "channel_get_failed",
+		emit_testdata("STATE4", "IMU6D", "0", "sample", "sample_fetch_failed",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}

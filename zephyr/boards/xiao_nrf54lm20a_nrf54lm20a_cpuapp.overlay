@@ -22,6 +22,10 @@
 	status = "okay";
 };
 
+&lsm6ds3tr_c {
+	zephyr,deferred-init;
+};
+
 / {
 	aliases {
 		regulator-parent = &{/pmic-i2c/npm1300@6b/regulators};

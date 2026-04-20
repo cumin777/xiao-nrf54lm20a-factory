@@ -2,7 +2,7 @@
 
 ## IMU6D (STATE4) - All zeros
 
-**Status:** Fix pending verification
+**Status:** Fix implemented, pending hardware verification
 **Date:** 2026-04-20
 
 ### Symptom
@@ -18,9 +18,9 @@ All 6-axis readings return 0. VALUE=1 (fetch succeeded) but sensor data is zero.
 
 ### Root Cause
 
-1. **ODR not set (direct cause):** LSM6DSL powers up in power-down mode (ODR=0). The factory code calls `sensor_sample_fetch()` without first setting the sampling frequency via `sensor_attr_set(SENSOR_ATTR_SAMPLING_FREQUENCY)`. The sensor never starts sampling, so all reads return zeros.
+1. **Factory overlay missed the working sample's deferred-init sequence:** `test_plan/11-zephyr-imu` and `platform-seeedboards/examples/zephyr-imu` both add `zephyr,deferred-init` on `&lsm6ds3tr_c`, then call `device_init()` only after `power_en` and `imu_vdd` are enabled. The factory overlay had the regulator label, but did not defer IMU init, so the driver could auto-init before the rail was actually usable.
 
-2. **Missing `imu_vdd` regulator label:** The board DTSI defines LDO1 but without an `imu_vdd` label. `at_enable_imu_power()` checks `DT_NODELABEL(imu_vdd)` which doesn't exist, so LDO1 is never explicitly enabled. (LDO1 has `regulator-boot-on` from the board DTSI, so it may already be on at boot, but explicit control is missing.)
+2. **Single-shot fetch path was weaker than the working sample:** The factory code set ODR, then immediately used one `sensor_sample_fetch()` call. For a single AT transaction this is more fragile than the sample's sequence of `sensor_sample_fetch_chan()` per sensor block after a powered and manually initialized device. If the first frame is read too early, the output registers can remain all zero.
 
 ### Reference
 
@@ -31,8 +31,9 @@ Working implementation: `test_plan/11-zephyr-imu/src/main.c`
 
 ### Applied Fix
 
-- `src/at_handler.c`: Added `sensor_attr_set()` calls for `SENSOR_CHAN_ACCEL_XYZ` and `SENSOR_CHAN_GYRO_XYZ` with ODR 26Hz before `sensor_sample_fetch()`
-- `zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay`: Added `imu_vdd: LDO1` label with 3.3V
+- `zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay`: Added `&lsm6ds3tr_c { zephyr,deferred-init; }` to align the factory firmware with the known-good IMU samples.
+- `src/at_handler.c`: Added `at_ensure_imu_ready()` so `AT+IMU6D` enables regulators first and then calls `device_init(g_imu_dev)` when the deferred-init device is still not ready.
+- `src/at_handler.c`: Switched the single-shot read flow to sample-style `sensor_sample_fetch_chan()` for accel and gyro separately, with a one-ODR settle delay before the first read.
 
 ---
 
