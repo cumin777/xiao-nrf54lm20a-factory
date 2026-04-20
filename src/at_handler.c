@@ -564,7 +564,7 @@ static int at_enable_dmic_power(void)
 	}
 #endif
 
-	k_sleep(K_MSEC(10));
+	k_sleep(K_MSEC(20));
 	return 0;
 }
 
@@ -848,11 +848,30 @@ static int at_handle_imu6d(void)
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
 	struct sensor_value accel_x, accel_y, accel_z;
 	struct sensor_value gyro_x, gyro_y, gyro_z;
+	struct sensor_value odr_attr;
 	int rc;
 
 	rc = at_enable_imu_power();
 	if (rc != 0 || !device_is_ready(g_imu_dev)) {
 		emit_testdata("STATE4", "IMU6D", "0", "sample", "imu_not_ready",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	odr_attr.val1 = 26;
+	odr_attr.val2 = 0;
+	rc = sensor_attr_set(g_imu_dev, SENSOR_CHAN_ACCEL_XYZ,
+			     SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
+	if (rc != 0) {
+		emit_testdata("STATE4", "IMU6D", "0", "sample", "accel_odr_set_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	rc = sensor_attr_set(g_imu_dev, SENSOR_CHAN_GYRO_XYZ,
+			     SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
+	if (rc != 0) {
+		emit_testdata("STATE4", "IMU6D", "0", "sample", "gyro_odr_set_failed",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
@@ -927,9 +946,15 @@ static int at_handle_micamp(void)
 	int32_t avg;
 	int rc;
 
-	dmic_dev = device_get_binding(g_dmic_dev_name);
 	rc = at_enable_dmic_power();
-	if (rc != 0 || dmic_dev == NULL || !device_is_ready(dmic_dev)) {
+	if (rc != 0) {
+		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_power_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	dmic_dev = device_get_binding(g_dmic_dev_name);
+	if (dmic_dev == NULL || !device_is_ready(dmic_dev)) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_not_ready",
 			      "err:HW_NOT_READY");
 		return -ENODEV;

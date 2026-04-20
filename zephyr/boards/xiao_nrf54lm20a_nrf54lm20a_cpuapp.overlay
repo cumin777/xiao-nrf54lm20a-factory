@@ -8,6 +8,20 @@
 	scl-gpios = <&gpio1 17 GPIO_ACTIVE_HIGH>;
 };
 
+&pmic {
+	regulators {
+		imu_vdd: dmic_vdd: LDO1 {
+			regulator-min-microvolt = <3300000>;
+			regulator-max-microvolt = <3300000>;
+			regulator-boot-on;
+		};
+	};
+};
+
+&pdm20 {
+	status = "okay";
+};
+
 / {
 	aliases {
 		regulator-parent = &{/pmic-i2c/npm1300@6b/regulators};
