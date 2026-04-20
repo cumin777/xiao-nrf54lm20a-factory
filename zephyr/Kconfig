@@ -58,6 +58,20 @@ config FACTORY_BATV_DELTA_MAX_MV
 	help
 	  Host-side reference delta for BATV checks (firmware does not judge PASS/FAIL).
 
+config FACTORY_SLEEPI_WINDOW_MS
+	int "State5 sleep current sampling window (ms)"
+	range 10 10000
+	default 1000
+	help
+	  Delay between pre/post current samples for AT+SLEEPI.
+
+config FACTORY_SLEEPI_REF_UA
+	int "State5 sleep current reference (uA)"
+	range 0 2000000
+	default 0
+	help
+	  Host-side reference current for SLEEPI checks (firmware does not judge PASS/FAIL).
+
 config FACTORY_DMIC_SAMPLE_RATE_HZ
 	int "DMIC sample rate (Hz)"
 	range 8000 48000

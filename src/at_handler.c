@@ -49,6 +49,14 @@
 #define CONFIG_FACTORY_BATV_DELTA_MAX_MV 200
 #endif
 
+#ifndef CONFIG_FACTORY_SLEEPI_WINDOW_MS
+#define CONFIG_FACTORY_SLEEPI_WINDOW_MS 1000
+#endif
+
+#ifndef CONFIG_FACTORY_SLEEPI_REF_UA
+#define CONFIG_FACTORY_SLEEPI_REF_UA 0
+#endif
+
 #ifndef CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ
 #define CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ 16000
 #endif
@@ -834,7 +842,45 @@ static int at_handle_micamp(void)
 
 static int at_handle_sleepi(void)
 {
-	return at_handle_not_implemented("STATE5", "SLEEPI", "err:MEASURE_PATH_TBD");
+	struct sensor_value current_before;
+	struct sensor_value current_after;
+	int64_t before_ua;
+	int64_t after_ua;
+	int64_t delta_ua;
+	int rc;
+
+	rc = at_pmic_charger_fetch(&current_before, NULL, NULL);
+	if (rc != 0) {
+		emit_testdata("STATE5", "SLEEPI", "0", "uA", "pre_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	k_msleep(CONFIG_FACTORY_SLEEPI_WINDOW_MS);
+
+	rc = at_pmic_charger_fetch(&current_after, NULL, NULL);
+	if (rc != 0) {
+		emit_testdata("STATE5", "SLEEPI", "0", "uA", "post_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	before_ua = sensor_value_to_micro(&current_before);
+	after_ua = sensor_value_to_micro(&current_after);
+	delta_ua = after_ua - before_ua;
+
+	uart_send_str("+TESTDATA:STATE5,ITEM=SLEEPI,VALUE=");
+	uart_send_s32((int32_t)after_ua);
+	uart_send_str(",UNIT=uA,RAW=");
+	uart_send_s32((int32_t)before_ua);
+	uart_send_str(",META=delta_uA:");
+	uart_send_s32((int32_t)delta_ua);
+	uart_send_str(";window_ms:");
+	uart_send_u32(CONFIG_FACTORY_SLEEPI_WINDOW_MS);
+	uart_send_str(";ref_uA:");
+	uart_send_u32(CONFIG_FACTORY_SLEEPI_REF_UA);
+	uart_send_line(";mode:pmic_gauge_avg_current");
+	return 0;
 }
 
 static int at_handle_keywake(void)
@@ -1201,6 +1247,10 @@ static int at_handle_thresh_get(void)
 			     "mA", "state:STATE2,item:CHGCUR");
 	emit_testdata_cfg_u32("BATV_DELTA_MAX_MV", CONFIG_FACTORY_BATV_DELTA_MAX_MV,
 			     "mV", "state:STATE2,item:BATV");
+	emit_testdata_cfg_u32("SLEEPI_WINDOW_MS", CONFIG_FACTORY_SLEEPI_WINDOW_MS,
+			     "ms", "state:STATE5,item:SLEEPI");
+	emit_testdata_cfg_u32("SLEEPI_REF_UA", CONFIG_FACTORY_SLEEPI_REF_UA,
+			     "uA", "state:STATE5,item:SLEEPI");
 	return 0;
 }
 
