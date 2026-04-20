@@ -313,13 +313,6 @@ static void emit_final_status(int rc)
 	uart_send_line(error_reason_from_rc(rc));
 }
 
-static int at_handle_not_implemented(const char *state, const char *item,
-			     const char *meta)
-{
-	emit_testdata(state, item, "0", "na", "not_implemented", meta);
-	return -ENOSYS;
-}
-
 static int at_adc_ensure_ready(void)
 {
 	int rc;
