@@ -1,5 +1,45 @@
 # Factory Test Issues
 
+## AT Parser - Intermittent ERROR:UNKNOWN_COMMAND
+
+**Status:** Fix implemented, pending repeated hardware verification
+**Date:** 2026-04-20
+
+### Symptom
+
+Repeatedly sending the same valid AT command occasionally returned:
+
+```text
+ERROR:UNKNOWN_COMMAND
+```
+
+Example observed during `AT+IMU6D` retest:
+
+```text
+AT+IMU6D
++TESTDATA:STATE4,ITEM=IMU6D,...
+OK
+
+AT+IMU6D
+ERROR:UNKNOWN_COMMAND
+```
+
+### Root Cause
+
+1. **`UNKNOWN_COMMAND` is a parser failure, not an IMU failure:** The response is only emitted when `at_handler_process_line()` fails to match the received line against any command in `g_item_cmds`/`g_state_cmds`.
+
+2. **The old RX loop accepted every non-CR/LF byte into the command buffer:** In `src/main.c`, any byte other than `\r` or `\n` was appended to `at_buf`. On a shared `UART21` link, a stray leading byte, echo byte, or line noise could turn `AT+IMU6D` into a different string such as `<junk>AT+IMU6D`, which then correctly fell through to `ERROR:UNKNOWN_COMMAND`.
+
+3. **There was no resynchronization to the `AT` prefix:** Once a garbage byte entered an empty buffer, the next otherwise-valid command was parsed as a malformed line instead of being resynced.
+
+### Applied Fix
+
+- `src/main.c`: Added printable-ASCII filtering so non-printable garbage bytes are dropped instead of entering the AT line buffer.
+- `src/main.c`: Added RX resynchronization to a clean `AT` prefix. A new command is only assembled after seeing `A` then `T`, which prevents stray leading bytes from poisoning the next command.
+- `tests/verify_factory_uart_rx.sh`: Added a regression check for the new UART RX filtering/resync logic.
+
+---
+
 ## IMU6D (STATE4) - All zeros
 
 **Status:** Fix implemented, pending hardware verification

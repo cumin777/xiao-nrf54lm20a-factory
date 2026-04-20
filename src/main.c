@@ -35,6 +35,22 @@ static void uart_send_line(const char *str)
 	uart_send_str("\r\n");
 }
 
+static bool at_rx_is_printable(uint8_t ch)
+{
+	return ch >= 0x20U && ch <= 0x7eU;
+}
+
+static void at_rx_reset(char *buf, size_t *len)
+{
+	if (buf != NULL) {
+		buf[0] = '\0';
+	}
+
+	if (len != NULL) {
+		*len = 0U;
+	}
+}
+
 static void run_factory_program(void)
 {
 	const struct uart_config factory_uart_cfg = {
@@ -63,6 +79,8 @@ int main(void)
 	char at_buf[AT_BUF_SIZE];
 	size_t at_len = 0;
 	int rc;
+
+	at_rx_reset(at_buf, &at_len);
 
 	if (!device_is_ready(uart_dev)) {
 		return 0;
@@ -102,12 +120,37 @@ int main(void)
 				if (at_len > 0) {
 					at_buf[at_len] = '\0';
 					at_handler_process_line(at_buf, at_len);
-					at_len = 0;
+					at_rx_reset(at_buf, &at_len);
 				}
-			} else if (at_len < (AT_BUF_SIZE - 1U)) {
+				continue;
+			}
+
+			if (!at_rx_is_printable(ch)) {
+				at_rx_reset(at_buf, &at_len);
+				continue;
+			}
+
+			/* Resync on a clean "AT" prefix so stray UART bytes do not poison the next command. */
+			if (at_len == 0U) {
+				if (ch != 'A') {
+					continue;
+				}
+			} else if (at_len == 1U && at_buf[0] == 'A') {
+				if (ch == 'A') {
+					at_buf[0] = 'A';
+					continue;
+				}
+
+				if (ch != 'T') {
+					at_rx_reset(at_buf, &at_len);
+					continue;
+				}
+			}
+
+			if (at_len < (AT_BUF_SIZE - 1U)) {
 				at_buf[at_len++] = (char)ch;
 			} else {
-				at_len = 0;
+				at_rx_reset(at_buf, &at_len);
 				uart_send_line("ERROR:BUFFER_OVERFLOW");
 			}
 		} else {
