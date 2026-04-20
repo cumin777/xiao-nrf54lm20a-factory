@@ -37,4 +37,25 @@ config FACTORY_ADC_3V3_CHANNEL
 	help
 	  Maps 3V3 sampling to zephyr,user io-channels index.
 
+config FACTORY_DMIC_SAMPLE_RATE_HZ
+	int "DMIC sample rate (Hz)"
+	range 8000 48000
+	default 16000
+	help
+	  Sampling rate used by AT+MICAMP lightweight capture.
+
+config FACTORY_DMIC_BLOCK_SIZE
+	int "DMIC capture block size (bytes)"
+	range 256 4096
+	default 640
+	help
+	  Audio block size for single-shot MIC amplitude capture.
+
+config FACTORY_DMIC_READ_TIMEOUT_MS
+	int "DMIC read timeout (ms)"
+	range 100 5000
+	default 1000
+	help
+	  Timeout used while waiting for one DMIC block in AT+MICAMP.
+
 endmenu

@@ -5,9 +5,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <zephyr/audio/dmic.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/regulator.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
@@ -32,6 +34,18 @@
 
 #ifndef CONFIG_FACTORY_ADC_3V3_CHANNEL
 #define CONFIG_FACTORY_ADC_3V3_CHANNEL 1
+#endif
+
+#ifndef CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ
+#define CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ 16000
+#endif
+
+#ifndef CONFIG_FACTORY_DMIC_BLOCK_SIZE
+#define CONFIG_FACTORY_DMIC_BLOCK_SIZE 640
+#endif
+
+#ifndef CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS
+#define CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS 1000
 #endif
 
 #define FACTORY_ADC_CHANNEL_COUNT 8
@@ -68,6 +82,30 @@ static const struct gpio_dt_spec g_sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 static struct gpio_callback g_sw0_cb_data;
 static bool g_keywake_ready;
 static uint32_t g_keywake_irq_count;
+
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+static const struct device *const g_imu_dev = DEVICE_DT_GET(DT_ALIAS(imu0));
+#endif
+
+#if DT_NODE_EXISTS(DT_ALIAS(dmic20))
+static const char *const g_dmic_dev_name = DEVICE_DT_NAME(DT_ALIAS(dmic20));
+K_MEM_SLAB_DEFINE_STATIC(g_dmic_mem_slab, CONFIG_FACTORY_DMIC_BLOCK_SIZE, 4, 4);
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(power_en))
+static const struct device *const g_power_en_dev =
+	DEVICE_DT_GET(DT_NODELABEL(power_en));
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(imu_vdd))
+static const struct device *const g_imu_vdd_dev =
+	DEVICE_DT_GET(DT_NODELABEL(imu_vdd));
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(dmic_vdd))
+static const struct device *const g_dmic_vdd_dev =
+	DEVICE_DT_GET(DT_NODELABEL(dmic_vdd));
+#endif
 
 static void uart_send_str(const char *s)
 {
@@ -417,6 +455,62 @@ static int at_keywake_ensure_ready(void)
 	return 0;
 }
 
+static int at_enable_imu_power(void)
+{
+	int ret;
+
+#if DT_NODE_EXISTS(DT_NODELABEL(power_en))
+	if (!device_is_ready(g_power_en_dev)) {
+		return -ENODEV;
+	}
+	ret = regulator_enable(g_power_en_dev);
+	if (ret < 0 && ret != -EALREADY) {
+		return -ENODEV;
+	}
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(imu_vdd))
+	if (!device_is_ready(g_imu_vdd_dev)) {
+		return -ENODEV;
+	}
+	ret = regulator_enable(g_imu_vdd_dev);
+	if (ret < 0 && ret != -EALREADY) {
+		return -ENODEV;
+	}
+#endif
+
+	k_sleep(K_MSEC(10));
+	return 0;
+}
+
+static int at_enable_dmic_power(void)
+{
+	int ret;
+
+#if DT_NODE_EXISTS(DT_NODELABEL(power_en))
+	if (!device_is_ready(g_power_en_dev)) {
+		return -ENODEV;
+	}
+	ret = regulator_enable(g_power_en_dev);
+	if (ret < 0 && ret != -EALREADY) {
+		return -ENODEV;
+	}
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(dmic_vdd))
+	if (!device_is_ready(g_dmic_vdd_dev)) {
+		return -ENODEV;
+	}
+	ret = regulator_enable(g_dmic_vdd_dev);
+	if (ret < 0 && ret != -EALREADY) {
+		return -ENODEV;
+	}
+#endif
+
+	k_sleep(K_MSEC(10));
+	return 0;
+}
+
 static int at_handle_chgcur(void)
 {
 	return at_handle_not_implemented("STATE2", "CHGCUR", "err:SENSOR_NOT_READY");
@@ -478,12 +572,149 @@ static int at_handle_nfcloop(void)
 
 static int at_handle_imu6d(void)
 {
-	return at_handle_not_implemented("STATE4", "IMU6D", "err:IMU_NOT_READY");
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	struct sensor_value accel_x, accel_y, accel_z;
+	struct sensor_value gyro_x, gyro_y, gyro_z;
+	int rc;
+
+	rc = at_enable_imu_power();
+	if (rc != 0 || !device_is_ready(g_imu_dev)) {
+		emit_testdata("STATE4", "IMU6D", "0", "sample", "imu_not_ready",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	rc = sensor_sample_fetch(g_imu_dev);
+	if (rc != 0) {
+		emit_testdata("STATE4", "IMU6D", "0", "sample", "fetch_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	if (sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_X, &accel_x) != 0 ||
+	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Y, &accel_y) != 0 ||
+	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Z, &accel_z) != 0 ||
+	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_X, &gyro_x) != 0 ||
+	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Y, &gyro_y) != 0 ||
+	    sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Z, &gyro_z) != 0) {
+		emit_testdata("STATE4", "IMU6D", "0", "sample", "channel_get_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	uart_send_str("+TESTDATA:STATE4,ITEM=IMU6D,VALUE=1,UNIT=sample,RAW=ax_u:");
+	uart_send_s32(sensor_value_to_micro(&accel_x));
+	uart_send_str(";ay_u:");
+	uart_send_s32(sensor_value_to_micro(&accel_y));
+	uart_send_str(";az_u:");
+	uart_send_s32(sensor_value_to_micro(&accel_z));
+	uart_send_str(";gx_u:");
+	uart_send_s32(sensor_value_to_micro(&gyro_x));
+	uart_send_str(";gy_u:");
+	uart_send_s32(sensor_value_to_micro(&gyro_y));
+	uart_send_str(";gz_u:");
+	uart_send_s32(sensor_value_to_micro(&gyro_z));
+	uart_send_line(",META=mode:single_fetch;src:imu0");
+	return 0;
+#else
+	emit_testdata("STATE4", "IMU6D", "0", "sample", "imu_alias_missing",
+		      "err:HW_NOT_READY");
+	return -ENODEV;
+#endif
 }
 
 static int at_handle_micamp(void)
 {
-	return at_handle_not_implemented("STATE4", "MICAMP", "err:DMIC_NOT_READY");
+#if DT_NODE_EXISTS(DT_ALIAS(dmic20))
+	const struct device *dmic_dev;
+	struct pcm_stream_cfg stream_cfg = {
+		.pcm_rate = CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ,
+		.pcm_width = 16,
+		.block_size = CONFIG_FACTORY_DMIC_BLOCK_SIZE,
+		.mem_slab = &g_dmic_mem_slab,
+	};
+	struct dmic_cfg dmic_cfg = {
+		.io = {
+			.min_pdm_clk_freq = 1000000,
+			.max_pdm_clk_freq = 3500000,
+			.min_pdm_clk_dc = 40,
+			.max_pdm_clk_dc = 60,
+		},
+		.streams = &stream_cfg,
+		.channel = {
+			.req_num_streams = 1,
+			.req_num_chan = 1,
+		},
+	};
+	void *buffer = NULL;
+	uint32_t size = 0;
+	uint32_t samples;
+	int64_t sum_abs = 0;
+	int32_t peak = 0;
+	int32_t avg;
+	int rc;
+
+	dmic_dev = device_get_binding(g_dmic_dev_name);
+	rc = at_enable_dmic_power();
+	if (rc != 0 || dmic_dev == NULL || !device_is_ready(dmic_dev)) {
+		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_not_ready",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	dmic_cfg.channel.req_chan_map_lo =
+		dmic_build_channel_map(0, 0, PDM_CHAN_LEFT);
+
+	rc = dmic_configure(dmic_dev, &dmic_cfg);
+	if (rc != 0) {
+		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_config_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	rc = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
+	if (rc != 0) {
+		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_start_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	rc = dmic_read(dmic_dev, 0, &buffer, &size, CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS);
+	(void)dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
+	if (rc != 0 || buffer == NULL || size < sizeof(int16_t)) {
+		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_read_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	samples = size / sizeof(int16_t);
+	for (uint32_t i = 0; i < samples; ++i) {
+		int32_t v = ((int16_t *)buffer)[i];
+		int32_t abs_v = (v < 0) ? -v : v;
+
+		if (abs_v > peak) {
+			peak = abs_v;
+		}
+		sum_abs += abs_v;
+	}
+	avg = (samples > 0) ? (int32_t)(sum_abs / samples) : 0;
+	(void)k_mem_slab_free(&g_dmic_mem_slab, buffer);
+
+	uart_send_str("+TESTDATA:STATE4,ITEM=MICAMP,VALUE=");
+	uart_send_s32(peak);
+	uart_send_str(",UNIT=abs16,RAW=");
+	uart_send_s32(avg);
+	uart_send_str(",META=samples:");
+	uart_send_u32(samples);
+	uart_send_str(";rate:");
+	uart_send_u32(CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ);
+	uart_send_line(";mode:single_block");
+	return 0;
+#else
+	emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_alias_missing",
+		      "err:HW_NOT_READY");
+	return -ENODEV;
+#endif
 }
 
 static int at_handle_sleepi(void)
