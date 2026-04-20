@@ -37,6 +37,27 @@ config FACTORY_ADC_3V3_CHANNEL
 	help
 	  Maps 3V3 sampling to zephyr,user io-channels index.
 
+config FACTORY_ADC_BATV_CHANNEL
+	int "ADC channel index for BATV fallback sampling"
+	range 0 7
+	default 2
+	help
+	  Maps BATV fallback sampling to zephyr,user io-channels index.
+
+config FACTORY_CHGCUR_REF_MA
+	int "State2 charge current reference (mA)"
+	range 0 5000
+	default 0
+	help
+	  Host-side reference value for CHGCUR checks (firmware does not judge PASS/FAIL).
+
+config FACTORY_BATV_DELTA_MAX_MV
+	int "State2 BATV reference delta (mV)"
+	range 0 2000
+	default 200
+	help
+	  Host-side reference delta for BATV checks (firmware does not judge PASS/FAIL).
+
 config FACTORY_DMIC_SAMPLE_RATE_HZ
 	int "DMIC sample rate (Hz)"
 	range 8000 48000

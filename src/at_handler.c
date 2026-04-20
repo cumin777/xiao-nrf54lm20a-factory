@@ -10,6 +10,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/sensor/npm13xx_charger.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
@@ -34,6 +35,18 @@
 
 #ifndef CONFIG_FACTORY_ADC_3V3_CHANNEL
 #define CONFIG_FACTORY_ADC_3V3_CHANNEL 1
+#endif
+
+#ifndef CONFIG_FACTORY_ADC_BATV_CHANNEL
+#define CONFIG_FACTORY_ADC_BATV_CHANNEL 2
+#endif
+
+#ifndef CONFIG_FACTORY_CHGCUR_REF_MA
+#define CONFIG_FACTORY_CHGCUR_REF_MA 0
+#endif
+
+#ifndef CONFIG_FACTORY_BATV_DELTA_MAX_MV
+#define CONFIG_FACTORY_BATV_DELTA_MAX_MV 200
 #endif
 
 #ifndef CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ
@@ -105,6 +118,11 @@ static const struct device *const g_imu_vdd_dev =
 #if DT_NODE_EXISTS(DT_NODELABEL(dmic_vdd))
 static const struct device *const g_dmic_vdd_dev =
 	DEVICE_DT_GET(DT_NODELABEL(dmic_vdd));
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(pmic_charger))
+static const struct device *const g_pmic_charger_dev =
+	DEVICE_DT_GET(DT_NODELABEL(pmic_charger));
 #endif
 
 static void uart_send_str(const char *s)
@@ -511,14 +529,111 @@ static int at_enable_dmic_power(void)
 	return 0;
 }
 
+static int at_pmic_charger_fetch(struct sensor_value *avg_current,
+				 struct sensor_value *bat_voltage,
+				 struct sensor_value *chg_status)
+{
+#if DT_NODE_EXISTS(DT_NODELABEL(pmic_charger))
+	if (!device_is_ready(g_pmic_charger_dev)) {
+		return -ENODEV;
+	}
+
+	if (sensor_sample_fetch(g_pmic_charger_dev) != 0) {
+		return -ENODEV;
+	}
+
+	if (avg_current != NULL &&
+	    sensor_channel_get(g_pmic_charger_dev, SENSOR_CHAN_GAUGE_AVG_CURRENT,
+			       avg_current) != 0) {
+		return -ENODEV;
+	}
+
+	if (bat_voltage != NULL &&
+	    sensor_channel_get(g_pmic_charger_dev, SENSOR_CHAN_GAUGE_VOLTAGE,
+			       bat_voltage) != 0) {
+		return -ENODEV;
+	}
+
+	if (chg_status != NULL &&
+	    sensor_channel_get(g_pmic_charger_dev,
+			       SENSOR_CHAN_NPM13XX_CHARGER_STATUS,
+			       chg_status) != 0) {
+		chg_status->val1 = 0;
+		chg_status->val2 = 0;
+	}
+
+	return 0;
+#else
+	ARG_UNUSED(avg_current);
+	ARG_UNUSED(bat_voltage);
+	ARG_UNUSED(chg_status);
+	return -ENODEV;
+#endif
+}
+
 static int at_handle_chgcur(void)
 {
-	return at_handle_not_implemented("STATE2", "CHGCUR", "err:SENSOR_NOT_READY");
+	struct sensor_value avg_current;
+	struct sensor_value chg_status;
+	int64_t current_ua;
+	int32_t current_ma;
+	int rc;
+
+	rc = at_pmic_charger_fetch(&avg_current, NULL, &chg_status);
+	if (rc != 0) {
+		emit_testdata("STATE2", "CHGCUR", "0", "mA", "charger_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	current_ua = sensor_value_to_micro(&avg_current);
+	current_ma = (int32_t)(current_ua / 1000);
+
+	uart_send_str("+TESTDATA:STATE2,ITEM=CHGCUR,VALUE=");
+	uart_send_s32(current_ma);
+	uart_send_str(",UNIT=mA,RAW=");
+	uart_send_s32((int32_t)current_ua);
+	uart_send_str(",META=src:pmic_charger;status:");
+	uart_send_s32(chg_status.val1);
+	uart_send_str(";ref_ma:");
+	uart_send_u32(CONFIG_FACTORY_CHGCUR_REF_MA);
+	uart_send_line(";sensor:gauge_avg_current");
+	return 0;
 }
 
 static int at_handle_batv(void)
 {
-	return at_handle_not_implemented("STATE2", "BATV", "err:ADC_NOT_READY");
+	struct sensor_value bat_voltage;
+	int32_t bat_mv;
+	int16_t bat_raw;
+	int rc;
+
+	rc = at_pmic_charger_fetch(NULL, &bat_voltage, NULL);
+	if (rc == 0) {
+		int64_t bat_uv = sensor_value_to_micro(&bat_voltage);
+
+		bat_mv = (int32_t)(bat_uv / 1000);
+		uart_send_str("+TESTDATA:STATE2,ITEM=BATV,VALUE=");
+		uart_send_s32(bat_mv);
+		uart_send_str(",UNIT=mV,RAW=");
+		uart_send_s32((int32_t)bat_uv);
+		uart_send_str(",META=src:pmic_charger;ref_delta_mv:");
+		uart_send_u32(CONFIG_FACTORY_BATV_DELTA_MAX_MV);
+		uart_send_line(";sensor:gauge_voltage");
+		return 0;
+	}
+
+	rc = at_adc_sample_mv((uint8_t)CONFIG_FACTORY_ADC_BATV_CHANNEL, &bat_mv, &bat_raw);
+	if (rc != 0) {
+		emit_testdata("STATE2", "BATV", "0", "mV", "batv_read_failed",
+			      "err:HW_NOT_READY");
+		return rc;
+	}
+
+	emit_testdata_adc("STATE2", "BATV", bat_mv, bat_raw,
+			  CONFIG_FACTORY_BATV_DELTA_MAX_MV,
+			  (uint8_t)CONFIG_FACTORY_ADC_BATV_CHANNEL);
+	return 0;
 }
 
 static int at_handle_blescan(void)
@@ -1080,6 +1195,12 @@ static int at_handle_thresh_get(void)
 			     "idx", "source:zephyr_user.io-channels");
 	emit_testdata_cfg_u32("ADC_3V3_CHANNEL", CONFIG_FACTORY_ADC_3V3_CHANNEL,
 			     "idx", "source:zephyr_user.io-channels");
+	emit_testdata_cfg_u32("ADC_BATV_CHANNEL", CONFIG_FACTORY_ADC_BATV_CHANNEL,
+			     "idx", "state:STATE2,item:BATV(fallback)");
+	emit_testdata_cfg_u32("CHGCUR_REF_MA", CONFIG_FACTORY_CHGCUR_REF_MA,
+			     "mA", "state:STATE2,item:CHGCUR");
+	emit_testdata_cfg_u32("BATV_DELTA_MAX_MV", CONFIG_FACTORY_BATV_DELTA_MAX_MV,
+			     "mV", "state:STATE2,item:BATV");
 	return 0;
 }
 
