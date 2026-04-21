@@ -6,6 +6,7 @@
 &pmic_i2c {
 	sda-gpios = <&gpio1 18 GPIO_ACTIVE_HIGH>;
 	scl-gpios = <&gpio1 17 GPIO_ACTIVE_HIGH>;
+	status = "okay";
 };
 
 &pmic {
@@ -18,7 +19,7 @@
 	};
 };
 
-&pdm20 {
+dmic_dev: &pdm20 {
 	status = "okay";
 };
 

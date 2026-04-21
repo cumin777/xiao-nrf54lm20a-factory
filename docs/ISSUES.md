@@ -79,8 +79,8 @@ Working implementation: `test_plan/11-zephyr-imu/src/main.c`
 
 ## MICAMP (STATE4) - dmic_not_ready
 
-**Status:** Fix pending verification
-**Date:** 2026-04-20
+**Status:** Fix implemented, pending hardware verification
+**Date:** 2026-04-21
 
 ### Symptom
 
@@ -90,29 +90,30 @@ AT+MICAMP
 +TESTDATA:STATE4,ITEM=MICAMP,VALUE=0,UNIT=abs16,RAW=dmic_not_ready,META=err:HW_NOT_READY
 ```
 
-DMIC device not ready, `device_get_binding()` returns NULL or device not ready.
+DMIC device was not ready because the build did not materialize an enabled `pdm20` device object for the factory app.
 
 ### Root Cause
 
-1. **`pdm20` disabled in devicetree (direct cause):** The SoC DTSI (`nrf54lm20a.dtsi`) sets `pdm20` node to `status = "disabled"`. The factory overlay did not override this, so the DMIC driver was never loaded. `device_get_binding()` returns NULL.
+1. **The factory app was not generating an active `pdm20` device in the final build:** Before the fix, the generated app config showed `CONFIG_NRFX_PDM20` unset and runtime could only fail with `dmic_not_ready`.
 
-2. **Missing `dmic_vdd` regulator label:** Same issue as IMU - LDO1 (shared power rail for IMU and DMIC) has no `dmic_vdd` label, so `at_enable_dmic_power()` skips LDO1 enable.
+2. **The factory overlay was not aligned with the known-good sample fragment:** `test_plan/12-zephyr-dmic-recorder` uses `dmic_dev: &pdm20 { status = "okay"; }` plus `dmic_vdd` on PMIC LDO1. After aligning the overlay to that exact fragment and doing a clean rebuild, the factory app generated `CONFIG_NRFX_PDM20=y` and `CONFIG_AUDIO_DMIC_NRFX_PDM=y`.
 
-3. **Power-on order:** Code obtained device binding before enabling power. Should enable power first.
+3. **The AT handler used `device_get_binding()` instead of the sample's static `DEVICE_DT_GET()` path:** That hid the missing device-object problem until runtime. Switching to `DEVICE_DT_GET(DT_ALIAS(dmic20))` makes the code follow the same path as the working sample and the driver is now linked explicitly.
 
-4. **Insufficient stabilization delay:** 10ms vs 20ms in the working test plan.
+4. **Capture startup was less robust than the working sample:** The sample discards the first DMIC block after `DMIC_TRIGGER_START`. The factory handler now does the same before computing amplitude metrics.
 
 ### Reference
 
 Working implementation: `test_plan/12-zephyr-dmic-recorder/`
-- Overlay: `&pdm20 { status = "okay"; }` and `dmic_vdd: LDO1` with 3.3V
-- Code: calls `enable_dmic_power()` before any DMIC operations
-- Delay: 20ms after regulator enable
+- Overlay: `dmic_dev: &pdm20 { status = "okay"; }` and `dmic_vdd: LDO1` with 3.3V
+- Code: uses `DEVICE_DT_GET(DT_ALIAS(dmic20))`, powers PMIC first, then configures/starts DMIC
+- Capture flow: discard first DMIC block, then process subsequent audio data
 
 ### Applied Fix
 
-- `zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay`: Added `&pdm20 { status = "okay"; }` and `dmic_vdd` label on LDO1 (dual-labeled as `imu_vdd: dmic_vdd: LDO1`)
-- `src/at_handler.c`: Reordered power-on before device binding, increased stabilization delay from 10ms to 20ms
+- `zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay`: Aligned with the sample's `dmic_dev: &pdm20 { status = "okay"; }` fragment, kept `dmic_vdd` on the PMIC LDO1 rail, and ensured `pmic_i2c` is explicitly `okay`.
+- `src/at_handler.c`: Switched DMIC access from `device_get_binding()` to `DEVICE_DT_GET(DT_ALIAS(dmic20))`, preserving PMIC power-on sequencing and using a sample-style discard-first-block capture flow.
+- Verification after a clean rebuild: generated config now contains `CONFIG_NRFX_PDM20=y` and `CONFIG_AUDIO_DMIC_NRFX_PDM=y`, and the build includes `drivers/audio/dmic_nrfx_pdm.c.o`.
 
 ---
 

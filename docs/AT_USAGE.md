@@ -184,7 +184,7 @@ OK
 - 期望反馈（成功）：
 
 ```text
-+TESTDATA:STATE4,ITEM=MICAMP,VALUE=<peak_abs16>,UNIT=abs16,RAW=<avg_abs16>,META=samples:<n>;rate:<hz>;mode:single_block
++TESTDATA:STATE4,ITEM=MICAMP,VALUE=<peak_abs16>,UNIT=abs16,RAW=<avg_abs16>,META=samples:<n>;rate:<hz>;mode:single_block;discard:first_block
 OK
 ```
 

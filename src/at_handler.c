@@ -120,7 +120,7 @@ static const struct device *const g_imu_dev = DEVICE_DT_GET(DT_ALIAS(imu0));
 #endif
 
 #if DT_NODE_EXISTS(DT_ALIAS(dmic20))
-static const char *const g_dmic_dev_name = DEVICE_DT_NAME(DT_ALIAS(dmic20));
+static const struct device *const g_dmic_dev = DEVICE_DT_GET(DT_ALIAS(dmic20));
 K_MEM_SLAB_DEFINE_STATIC(g_dmic_mem_slab, CONFIG_FACTORY_DMIC_BLOCK_SIZE, 4, 4);
 #endif
 
@@ -998,7 +998,6 @@ static int at_handle_imu6d(void)
 static int at_handle_micamp(void)
 {
 #if DT_NODE_EXISTS(DT_ALIAS(dmic20))
-	const struct device *dmic_dev;
 	struct pcm_stream_cfg stream_cfg = {
 		.pcm_rate = CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ,
 		.pcm_width = 16,
@@ -1019,6 +1018,7 @@ static int at_handle_micamp(void)
 		},
 	};
 	void *buffer = NULL;
+	void *discard_buffer = NULL;
 	uint32_t size = 0;
 	uint32_t samples;
 	int64_t sum_abs = 0;
@@ -1033,8 +1033,7 @@ static int at_handle_micamp(void)
 		return -ENODEV;
 	}
 
-	dmic_dev = device_get_binding(g_dmic_dev_name);
-	if (dmic_dev == NULL || !device_is_ready(dmic_dev)) {
+	if (!device_is_ready(g_dmic_dev)) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_not_ready",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
@@ -1043,22 +1042,30 @@ static int at_handle_micamp(void)
 	dmic_cfg.channel.req_chan_map_lo =
 		dmic_build_channel_map(0, 0, PDM_CHAN_LEFT);
 
-	rc = dmic_configure(dmic_dev, &dmic_cfg);
+	rc = dmic_configure(g_dmic_dev, &dmic_cfg);
 	if (rc != 0) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_config_failed",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
-	rc = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
+	rc = dmic_trigger(g_dmic_dev, DMIC_TRIGGER_START);
 	if (rc != 0) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_start_failed",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
-	rc = dmic_read(dmic_dev, 0, &buffer, &size, CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS);
-	(void)dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
+	/* Discard the first block to let the DMIC pipeline settle, matching the working sample. */
+	rc = dmic_read(g_dmic_dev, 0, &discard_buffer, &size,
+		       CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS);
+	if (rc == 0 && discard_buffer != NULL) {
+		(void)k_mem_slab_free(&g_dmic_mem_slab, discard_buffer);
+		discard_buffer = NULL;
+	}
+
+	rc = dmic_read(g_dmic_dev, 0, &buffer, &size, CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS);
+	(void)dmic_trigger(g_dmic_dev, DMIC_TRIGGER_STOP);
 	if (rc != 0 || buffer == NULL || size < sizeof(int16_t)) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_read_failed",
 			      "err:HW_NOT_READY");
@@ -1086,7 +1093,7 @@ static int at_handle_micamp(void)
 	uart_send_u32(samples);
 	uart_send_str(";rate:");
 	uart_send_u32(CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ);
-	uart_send_line(";mode:single_block");
+	uart_send_line(";mode:single_block;discard:first_block");
 	return 0;
 #else
 	emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_alias_missing",

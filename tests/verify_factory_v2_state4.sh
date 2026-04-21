@@ -9,6 +9,8 @@ rg -n "device_init\\(g_imu_dev\\)" src/at_handler.c >/dev/null
 rg -n "sensor_sample_fetch_chan\\(g_imu_dev, SENSOR_CHAN_ACCEL_XYZ\\)" src/at_handler.c >/dev/null
 rg -n "sensor_sample_fetch_chan\\(g_imu_dev, SENSOR_CHAN_GYRO_XYZ\\)" src/at_handler.c >/dev/null
 rg -n "zephyr,deferred-init" zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay >/dev/null
+rg -n "DEVICE_DT_GET\\(DT_ALIAS\\(dmic20\\)\\)" src/at_handler.c >/dev/null
+rg -n "dmic_dev: &pdm20" zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay >/dev/null
 rg -n "dmic_configure|dmic_trigger|dmic_read|AUDIO_DMIC" src/at_handler.c >/dev/null
 
 # State4 placeholders must be removed
