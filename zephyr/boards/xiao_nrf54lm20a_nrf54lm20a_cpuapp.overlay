@@ -23,6 +23,10 @@ dmic_dev: &pdm20 {
 	status = "okay";
 };
 
+&py25q64 {
+	status = "okay";
+};
+
 &lsm6ds3tr_c {
 	zephyr,deferred-init;
 };

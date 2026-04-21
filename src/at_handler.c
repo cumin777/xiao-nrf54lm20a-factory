@@ -11,11 +11,14 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/sensor/npm13xx_charger.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/util.h>
 
 #include "factory_storage.h"
@@ -114,6 +117,7 @@ static const struct gpio_dt_spec g_sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 static struct gpio_callback g_sw0_cb_data;
 static bool g_keywake_ready;
 static uint32_t g_keywake_irq_count;
+static bool g_sleepi_system_off_pending;
 
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
 static const struct device *const g_imu_dev = DEVICE_DT_GET(DT_ALIAS(imu0));
@@ -142,6 +146,18 @@ static const struct device *const g_dmic_vdd_dev =
 #if DT_NODE_EXISTS(DT_NODELABEL(pmic_charger))
 static const struct device *const g_pmic_charger_dev =
 	DEVICE_DT_GET(DT_NODELABEL(pmic_charger));
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(py25q64), okay)
+static const struct device *const g_ext_flash_dev =
+	DEVICE_DT_GET(DT_NODELABEL(py25q64));
+static const struct device *const g_ext_flash_bus_dev =
+	DEVICE_DT_GET(DT_BUS(DT_NODELABEL(py25q64)));
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio2))
+static const struct device *const g_gpio2_dev =
+	DEVICE_DT_GET(DT_NODELABEL(gpio2));
 #endif
 
 #if defined(CONFIG_BT)
@@ -511,6 +527,113 @@ static int at_keywake_ensure_ready(void)
 
 	g_keywake_ready = true;
 	return 0;
+}
+
+static int at_keywake_configure_system_off_wakeup(void)
+{
+	int rc;
+
+	if (!gpio_is_ready_dt(&g_sw0)) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_configure_dt(&g_sw0, GPIO_INPUT);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_interrupt_configure_dt(&g_sw0, GPIO_INT_LEVEL_ACTIVE);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static int at_sleepi_configure_spi_pins(void)
+{
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio2))
+	int rc;
+
+	if (!device_is_ready(g_gpio2_dev)) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_configure(g_gpio2_dev, 5, GPIO_OUTPUT_HIGH);
+	if (rc != 0) {
+		return rc;
+	}
+
+	rc = gpio_pin_configure(g_gpio2_dev, 0, GPIO_OUTPUT_HIGH);
+	if (rc != 0) {
+		return rc;
+	}
+
+	rc = gpio_pin_configure(g_gpio2_dev, 3, GPIO_OUTPUT_HIGH);
+	if (rc != 0) {
+		return rc;
+	}
+
+	rc = gpio_pin_configure(g_gpio2_dev, 1, GPIO_OUTPUT_LOW);
+	if (rc != 0) {
+		return rc;
+	}
+
+	rc = gpio_pin_configure(g_gpio2_dev, 2, GPIO_OUTPUT_LOW);
+	if (rc != 0) {
+		return rc;
+	}
+
+	rc = gpio_pin_configure(g_gpio2_dev, 4, GPIO_INPUT | GPIO_PULL_DOWN);
+	if (rc != 0) {
+		return rc;
+	}
+
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int at_sleepi_suspend_external_flash(void)
+{
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(py25q64), okay) && defined(CONFIG_PM_DEVICE)
+	int rc;
+
+	if (!device_is_ready(g_ext_flash_dev)) {
+		return -ENODEV;
+	}
+
+	rc = pm_device_action_run(g_ext_flash_dev, PM_DEVICE_ACTION_SUSPEND);
+	if (rc != 0) {
+		return rc;
+	}
+
+	if (device_is_ready(g_ext_flash_bus_dev)) {
+		rc = pm_device_action_run(g_ext_flash_bus_dev,
+					 PM_DEVICE_ACTION_SUSPEND);
+		if (rc != 0) {
+			return rc;
+		}
+	}
+
+	return at_sleepi_configure_spi_pins();
+#else
+	return -ENODEV;
+#endif
+}
+
+static const char *at_keywake_reset_source(uint32_t flags, uint32_t reset_cause)
+{
+	if ((flags & FACTORY_PERSIST_FLAG_KEYWAKE_SW0) != 0U) {
+		return "gpio";
+	}
+
+	if (reset_cause != 0U) {
+		return "other";
+	}
+
+	return "none";
 }
 
 static int at_enable_imu_power(void)
@@ -1104,50 +1227,70 @@ static int at_handle_micamp(void)
 
 static int at_handle_sleepi(void)
 {
-	struct sensor_value current_before;
-	struct sensor_value current_after;
-	int64_t before_ua;
-	int64_t after_ua;
-	int64_t delta_ua;
+	uint32_t old_flags;
+	uint32_t old_reset_cause;
 	int rc;
 
-	rc = at_pmic_charger_fetch(&current_before, NULL, NULL);
+	if (g_ctx.persist == NULL) {
+		emit_testdata("STATE5", "SLEEPI", "0", "bool", "persist_null",
+			      "err:PRECONDITION_NOT_MET");
+		return -EACCES;
+	}
+
+	rc = at_keywake_configure_system_off_wakeup();
 	if (rc != 0) {
-		emit_testdata("STATE5", "SLEEPI", "0", "uA", "pre_read_failed",
+		emit_testdata("STATE5", "SLEEPI", "0", "bool", "sw0_wakeup_not_ready",
 			      "err:HW_NOT_READY");
 		return rc;
 	}
 
-	k_msleep(CONFIG_FACTORY_SLEEPI_WINDOW_MS);
+	old_flags = g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX];
+	old_reset_cause = g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX];
 
-	rc = at_pmic_charger_fetch(&current_after, NULL, NULL);
+	g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] &=
+		~(FACTORY_PERSIST_FLAG_KEYWAKE_LATCHED |
+		  FACTORY_PERSIST_FLAG_KEYWAKE_SW0);
+	g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] |=
+		FACTORY_PERSIST_FLAG_SLEEPI_ARMED;
+	g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX] = 0U;
+
+	rc = factory_storage_save(g_ctx.persist);
 	if (rc != 0) {
-		emit_testdata("STATE5", "SLEEPI", "0", "uA", "post_read_failed",
+		g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] = old_flags;
+		g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX] =
+			old_reset_cause;
+		emit_testdata("STATE5", "SLEEPI", "0", "bool", "sleep_state_save_failed",
+			      "err:STORAGE_IO_FAIL");
+		return -EIO;
+	}
+
+	rc = at_sleepi_suspend_external_flash();
+	if (rc != 0) {
+		g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] = old_flags;
+		g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX] =
+			old_reset_cause;
+		(void)factory_storage_save(g_ctx.persist);
+		emit_testdata("STATE5", "SLEEPI", "0", "bool", "flash_suspend_failed",
 			      "err:HW_NOT_READY");
 		return rc;
 	}
 
-	before_ua = sensor_value_to_micro(&current_before);
-	after_ua = sensor_value_to_micro(&current_after);
-	delta_ua = after_ua - before_ua;
+	g_sleepi_system_off_pending = true;
 
-	uart_send_str("+TESTDATA:STATE5,ITEM=SLEEPI,VALUE=");
-	uart_send_s32((int32_t)after_ua);
-	uart_send_str(",UNIT=uA,RAW=");
-	uart_send_s32((int32_t)before_ua);
-	uart_send_str(",META=delta_uA:");
-	uart_send_s32((int32_t)delta_ua);
-	uart_send_str(";window_ms:");
+	uart_send_str("+TESTDATA:STATE5,ITEM=SLEEPI,VALUE=1,UNIT=bool,RAW=system_off_armed,META=wakeup:sw0;window_ms:");
 	uart_send_u32(CONFIG_FACTORY_SLEEPI_WINDOW_MS);
 	uart_send_str(";ref_uA:");
 	uart_send_u32(CONFIG_FACTORY_SLEEPI_REF_UA);
-	uart_send_line(";mode:pmic_gauge_avg_current");
+	uart_send_line(";mode:system_off;flash:dpd");
 	return 0;
 }
 
 static int at_handle_keywake(void)
 {
 	int level;
+	uint32_t flags = 0U;
+	uint32_t wake_count = 0U;
+	uint32_t reset_cause = 0U;
 	int rc;
 
 	rc = at_keywake_ensure_ready();
@@ -1164,12 +1307,24 @@ static int at_handle_keywake(void)
 		return -ENODEV;
 	}
 
+	if (g_ctx.persist != NULL) {
+		flags = g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX];
+		wake_count = g_ctx.persist->reserved[FACTORY_PERSIST_WAKE_COUNT_IDX];
+		reset_cause = g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX];
+	}
+
 	uart_send_str("+TESTDATA:STATE6,ITEM=KEYWAKE,VALUE=");
-	uart_send_u32((uint32_t)level);
+	uart_send_u32((flags & FACTORY_PERSIST_FLAG_KEYWAKE_LATCHED) != 0U ? 1U : 0U);
 	uart_send_str(",UNIT=bool,RAW=");
+	uart_send_u32(wake_count);
+	uart_send_str(",META=alias:sw0;level:");
+	uart_send_u32((uint32_t)level);
+	uart_send_str(";irq_count:");
 	uart_send_u32(g_keywake_irq_count);
-	uart_send_str(",META=alias:sw0;irq_count=");
-	uart_send_u32(g_keywake_irq_count);
+	uart_send_str(";wake_reset:");
+	uart_send_str(at_keywake_reset_source(flags, reset_cause));
+	uart_send_str(";reset_cause:");
+	uart_send_u32(reset_cause);
 	uart_send_line("");
 
 	return 0;
@@ -1560,6 +1715,32 @@ void at_handler_init(const struct device *uart_dev,
 	g_adc_initialized = false;
 	g_keywake_ready = false;
 	g_keywake_irq_count = 0;
+	g_sleepi_system_off_pending = false;
+}
+
+void at_handler_run_deferred_action(void)
+{
+	if (!g_sleepi_system_off_pending) {
+		return;
+	}
+
+	g_sleepi_system_off_pending = false;
+
+#if defined(CONFIG_HWINFO)
+	(void)hwinfo_clear_reset_cause();
+#endif
+
+	/* Allow the trailing "OK" response to drain before UART21 is suspended. */
+	k_msleep(20);
+
+#if defined(CONFIG_PM_DEVICE)
+	if (g_ctx.uart != NULL && device_is_ready(g_ctx.uart)) {
+		(void)pm_device_action_run(g_ctx.uart, PM_DEVICE_ACTION_SUSPEND);
+	}
+#endif
+
+	k_msleep(20);
+	sys_poweroff();
 }
 
 void at_handler_process_line(const char *line, size_t len)

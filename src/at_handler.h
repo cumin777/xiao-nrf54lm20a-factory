@@ -11,5 +11,6 @@ void at_handler_init(const struct device *uart_dev,
 		     struct factory_persist *persist);
 
 void at_handler_process_line(const char *line, size_t len);
+void at_handler_run_deferred_action(void);
 
 #endif /* AT_HANDLER_H_ */

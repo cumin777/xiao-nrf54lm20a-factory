@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
@@ -49,6 +50,46 @@ static void at_rx_reset(char *buf, size_t *len)
 	if (len != NULL) {
 		*len = 0U;
 	}
+}
+
+static void update_keywake_boot_state(struct factory_persist *persist)
+{
+#if defined(CONFIG_HWINFO)
+	uint32_t reset_cause = 0U;
+	int rc;
+
+	if (persist == NULL) {
+		return;
+	}
+
+	rc = hwinfo_get_reset_cause(&reset_cause);
+	if (rc != 0) {
+		return;
+	}
+
+	if ((persist->reserved[FACTORY_PERSIST_FLAGS_IDX] &
+	     FACTORY_PERSIST_FLAG_SLEEPI_ARMED) == 0U) {
+		return;
+	}
+
+	persist->reserved[FACTORY_PERSIST_FLAGS_IDX] &=
+		~FACTORY_PERSIST_FLAG_SLEEPI_ARMED;
+	persist->reserved[FACTORY_PERSIST_FLAGS_IDX] &=
+		~(FACTORY_PERSIST_FLAG_KEYWAKE_LATCHED |
+		  FACTORY_PERSIST_FLAG_KEYWAKE_SW0);
+	persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX] = reset_cause;
+
+	if ((reset_cause & RESET_LOW_POWER_WAKE) != 0U) {
+		persist->reserved[FACTORY_PERSIST_FLAGS_IDX] |=
+			FACTORY_PERSIST_FLAG_KEYWAKE_LATCHED |
+			FACTORY_PERSIST_FLAG_KEYWAKE_SW0;
+		persist->reserved[FACTORY_PERSIST_WAKE_COUNT_IDX]++;
+	}
+
+	(void)factory_storage_save(persist);
+#else
+	ARG_UNUSED(persist);
+#endif
 }
 
 static void run_factory_program(void)
@@ -101,6 +142,8 @@ int main(void)
 		(void)factory_storage_save(&g_persist);
 	}
 
+	update_keywake_boot_state(&g_persist);
+
 	if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 		run_factory_program();
 	}
@@ -120,6 +163,7 @@ int main(void)
 				if (at_len > 0) {
 					at_buf[at_len] = '\0';
 					at_handler_process_line(at_buf, at_len);
+					at_handler_run_deferred_action();
 					at_rx_reset(at_buf, &at_len);
 				}
 				continue;

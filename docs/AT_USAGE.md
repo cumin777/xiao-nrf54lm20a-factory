@@ -191,24 +191,33 @@ OK
 ### 4.5 State5（休眠电流）
 
 #### `AT+SLEEPI`
-- 功能：在窗口前后读取 PMIC 平均电流并上报
+- 功能：准备外置 Flash 低功耗与 `SW0` 唤醒源，然后在 `OK` 后进入深度睡眠（system off）
 - 期望反馈（成功）：
 
 ```text
-+TESTDATA:STATE5,ITEM=SLEEPI,VALUE=<post_uA>,UNIT=uA,RAW=<pre_uA>,META=delta_uA:<d>;window_ms:<cfg>;ref_uA:<cfg>;mode:pmic_gauge_avg_current
++TESTDATA:STATE5,ITEM=SLEEPI,VALUE=1,UNIT=bool,RAW=system_off_armed,META=wakeup:sw0;window_ms:<cfg>;ref_uA:<cfg>;mode:system_off;flash:dpd
 OK
 ```
+
+- 说明：
+  - `OK` 发出后设备会很快进入深度睡眠，`UART21` 停止响应。
+  - 深睡期间电流应由治具/外部仪表按 `window_ms` 参考窗口测量。
+  - 唤醒方式为用户按下 `SW0`，设备会重启。
 
 ### 4.6 State6（按键测试）
 
 #### `AT+KEYWAKE`
-- 功能：读取按键状态与中断计数（SW0）
+- 功能：读取 `SW0` 当前电平、运行期中断计数，以及最近一次 `AT+SLEEPI` 后的持久化唤醒结果
 - 期望反馈（成功）：
 
 ```text
-+TESTDATA:STATE6,ITEM=KEYWAKE,VALUE=<0|1>,UNIT=bool,RAW=<irq_count>,META=alias:sw0;irq_count=<irq_count>
++TESTDATA:STATE6,ITEM=KEYWAKE,VALUE=<0|1>,UNIT=bool,RAW=<wake_count>,META=alias:sw0;level:<0|1>;irq_count:<irq_count>;wake_reset:<gpio|other|none>;reset_cause:<raw>
 OK
 ```
+
+- 字段说明：
+  - `VALUE=1` 表示最近一次已记录的深睡唤醒由 `SW0` 触发。
+  - `RAW` 为累计深睡唤醒次数。
 
 ### 4.7 State7（Flash 首次写入）
 
