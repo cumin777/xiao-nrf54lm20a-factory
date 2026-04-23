@@ -298,6 +298,41 @@ static void uart_send_s32(int32_t value)
 	uart_send_u32((uint32_t)value);
 }
 
+static void debug_send_label(const char *label)
+{
+	uart_send_str("[DBG] ");
+	uart_send_str(label);
+}
+
+static void debug_send_line(const char *label, const char *value)
+{
+	debug_send_label(label);
+	uart_send_line(value);
+}
+
+static void debug_send_span(const char *label, const char *value, size_t len)
+{
+	debug_send_label(label);
+	for (size_t i = 0; i < len; ++i) {
+		uart_poll_out(g_ctx.uart, (uint8_t)value[i]);
+	}
+	uart_send_str("\r\n");
+}
+
+static void debug_send_u32(const char *label, uint32_t value)
+{
+	debug_send_label(label);
+	uart_send_u32(value);
+	uart_send_str("\r\n");
+}
+
+static void debug_send_s32(const char *label, int32_t value)
+{
+	debug_send_label(label);
+	uart_send_s32(value);
+	uart_send_str("\r\n");
+}
+
 static void emit_testdata(const char *state, const char *item,
 			  const char *value, const char *unit,
 			  const char *raw, const char *meta)
@@ -400,6 +435,9 @@ static const char *error_reason_from_rc(int rc)
 
 static void emit_final_status(int rc)
 {
+	debug_send_s32("PARSE:final_rc=", rc);
+	debug_send_line("PARSE:final_reason=", error_reason_from_rc(rc));
+
 	if (rc == 0) {
 		uart_send_line("OK");
 		return;
@@ -2248,11 +2286,15 @@ static bool at_cmd_equals(const char *trimmed, size_t trimmed_len,
 
 static int dispatch_from_table(const char *trimmed, size_t trimmed_len,
 			       const struct at_cmd *table, size_t count,
-			       bool track_state)
+			       bool track_state, const char *table_name)
 {
+	debug_send_line("PARSE:dispatch_table=", table_name);
+
 	for (size_t i = 0; i < count; ++i) {
 		if (at_cmd_equals(trimmed, trimmed_len, table[i].cmd)) {
 			int rc = table[i].fn();
+
+			debug_send_line("PARSE:table_match=", table[i].cmd);
 
 			if (rc == 0 && track_state && g_ctx.persist != NULL) {
 				g_ctx.persist->state_bitmap |= BIT(i);
@@ -2264,6 +2306,8 @@ static int dispatch_from_table(const char *trimmed, size_t trimmed_len,
 			return rc;
 		}
 	}
+
+	debug_send_line("PARSE:table_miss=", table_name);
 
 	return -ENOENT;
 }
@@ -2566,82 +2610,109 @@ static int dispatch_text_command(char *cmd_buf)
 	char *argv[FACTORY_TEXT_CMD_MAX_TOKENS] = { 0 };
 	int argc = tokenize_text_command(cmd_buf, argv, ARRAY_SIZE(argv));
 
+	debug_send_s32("PARSE:text_argc=", argc);
+
 	if (argc <= 0) {
+		debug_send_line("PARSE:text_result=", "empty_or_invalid");
 		return -ENOENT;
 	}
 
+	for (int i = 0; i < argc; ++i) {
+		debug_send_label("PARSE:text_argv[");
+		uart_send_u32((uint32_t)i);
+		uart_send_str("]=");
+		uart_send_line(argv[i]);
+	}
+
 	if (argc == 1 && strcmp(argv[0], "help") == 0) {
+		debug_send_line("PARSE:text_match=", "help");
 		return at_handle_help();
 	}
 
 	if (argc == 5 && strcmp(argv[0], "gpio") == 0 &&
 	    strcmp(argv[1], "set") == 0) {
+		debug_send_line("PARSE:text_match=", "gpio set");
 		return text_handle_gpio_set(argv[2], argv[3], argv[4]);
 	}
 
 	if (argc == 4 && strcmp(argv[0], "gpio") == 0 &&
 	    strcmp(argv[1], "get") == 0) {
+		debug_send_line("PARSE:text_match=", "gpio get");
 		return text_handle_gpio_get(argv[2], argv[3]);
 	}
 
 	if (argc == 2 && strcmp(argv[0], "bt") == 0 &&
 	    strcmp(argv[1], "init") == 0) {
+		debug_send_line("PARSE:text_match=", "bt init");
 		return text_handle_bt_init();
 	}
 
 	if (argc == 3 && strcmp(argv[0], "bt") == 0 &&
 	    strcmp(argv[1], "scan") == 0 && strcmp(argv[2], "on") == 0) {
+		debug_send_line("PARSE:text_match=", "bt scan on");
 		return text_handle_bt_scan_on();
 	}
 
 	if (argc == 3 && strcmp(argv[0], "bt") == 0 &&
 	    strcmp(argv[1], "scan") == 0 && strcmp(argv[2], "off") == 0) {
+		debug_send_line("PARSE:text_match=", "bt scan off");
 		return text_handle_bt_scan_off();
 	}
 
 	if (argc == 2 && strcmp(argv[0], "sleep") == 0 &&
 	    strcmp(argv[1], "mode") == 0) {
+		debug_send_line("PARSE:text_match=", "sleep mode");
 		return text_handle_sleep_mode();
 	}
 
 	if (argc == 2 && strcmp(argv[0], "sys") == 0 &&
 	    strcmp(argv[1], "off") == 0) {
+		debug_send_line("PARSE:text_match=", "sys off");
 		return text_handle_sleep_mode();
 	}
 
 	if (argc == 2 && strcmp(argv[0], "ship") == 0 &&
 	    strcmp(argv[1], "mode") == 0) {
+		debug_send_line("PARSE:text_match=", "ship mode");
 		return text_handle_ship_mode();
 	}
 
 	if (argc == 3 && strcmp(argv[0], "mic") == 0 &&
 	    strcmp(argv[1], "capture") == 0) {
+		debug_send_line("PARSE:text_match=", "mic capture");
 		return text_handle_mic_capture(argv[2]);
 	}
 
 	if (argc == 2 && strcmp(argv[0], "imu") == 0 &&
 	    strcmp(argv[1], "get") == 0) {
+		debug_send_line("PARSE:text_match=", "imu get");
 		return text_handle_imu_get();
 	}
 
 	if (argc == 2 && strcmp(argv[0], "imu") == 0 &&
 	    strcmp(argv[1], "off") == 0) {
+		debug_send_line("PARSE:text_match=", "imu off");
 		return text_handle_imu_off();
 	}
 
 	if (argc == 2 && strcmp(argv[0], "flash") == 0) {
+		debug_send_line("PARSE:text_match=", "flash");
 		return text_handle_flash_write(argv[1]);
 	}
 
 	if (argc == 2 && strcmp(argv[0], "bat") == 0 &&
 	    strcmp(argv[1], "get") == 0) {
+		debug_send_line("PARSE:text_match=", "bat get");
 		return text_handle_bat_get();
 	}
 
 	if (argc == 2 && strcmp(argv[0], "uart20") == 0 &&
 	    strcmp(argv[1], "on") == 0) {
+		debug_send_line("PARSE:text_match=", "uart20 on");
 		return text_handle_uart20_on();
 	}
+
+	debug_send_line("PARSE:text_result=", "no_match");
 
 	return -ENOENT;
 }
@@ -2733,8 +2804,12 @@ void at_handler_process_line(const char *line, size_t len)
 	int rc;
 
 	if (line == NULL || len == 0) {
+		debug_send_line("PARSE:skip=", "null_or_empty");
 		return;
 	}
+
+	debug_send_u32("PARSE:raw_len=", (uint32_t)len);
+	debug_send_span("PARSE:raw=", line, len);
 
 	while (trimmed_len > 0 && isspace((unsigned char)trimmed[trimmed_len - 1])) {
 		trimmed_len--;
@@ -2746,27 +2821,35 @@ void at_handler_process_line(const char *line, size_t len)
 	}
 
 	if (trimmed_len == 0) {
+		debug_send_line("PARSE:skip=", "trimmed_empty");
 		return;
 	}
 
+	debug_send_u32("PARSE:trimmed_len=", (uint32_t)trimmed_len);
+	debug_send_span("PARSE:trimmed=", trimmed, trimmed_len);
+
 	if (at_cmd_equals(trimmed, trimmed_len, "AT")) {
+		debug_send_line("PARSE:direct_match=", "AT");
 		uart_send_line("OK");
 		return;
 	}
 
 	if (at_cmd_equals(trimmed, trimmed_len, "AT+HELP")) {
+		debug_send_line("PARSE:direct_match=", "AT+HELP");
 		rc = at_handle_help();
 		emit_final_status(rc);
 		return;
 	}
 
 	if (at_cmd_equals(trimmed, trimmed_len, "AT+FLASH?")) {
+		debug_send_line("PARSE:direct_match=", "AT+FLASH?");
 		rc = at_handle_flash_get();
 		emit_final_status(rc);
 		return;
 	}
 
 	if (at_cmd_equals(trimmed, trimmed_len, "AT+THRESH?")) {
+		debug_send_line("PARSE:direct_match=", "AT+THRESH?");
 		rc = at_handle_thresh_get();
 		emit_final_status(rc);
 		return;
@@ -2774,26 +2857,33 @@ void at_handler_process_line(const char *line, size_t len)
 
 	if (trimmed_len >= strlen("AT+FLASH=") &&
 	    strncmp(trimmed, "AT+FLASH=", strlen("AT+FLASH=")) == 0) {
+		debug_send_line("PARSE:direct_match=", "AT+FLASH=");
+		debug_send_span("PARSE:flash_arg=",
+			       trimmed + strlen("AT+FLASH="),
+			       trimmed_len - strlen("AT+FLASH="));
 		rc = at_handle_flash_set(trimmed + strlen("AT+FLASH="));
 		emit_final_status(rc);
 		return;
 	}
 
 	rc = dispatch_from_table(trimmed, trimmed_len,
-				 g_item_cmds, ARRAY_SIZE(g_item_cmds), false);
+				 g_item_cmds, ARRAY_SIZE(g_item_cmds), false,
+				 "item_table");
 	if (rc != -ENOENT) {
 		emit_final_status(rc);
 		return;
 	}
 
 	rc = dispatch_from_table(trimmed, trimmed_len,
-				 g_state_cmds, ARRAY_SIZE(g_state_cmds), true);
+				 g_state_cmds, ARRAY_SIZE(g_state_cmds), true,
+				 "state_table");
 	if (rc != -ENOENT) {
 		emit_final_status(rc);
 		return;
 	}
 
 	if (trimmed_len < sizeof(text_cmd_buf)) {
+		debug_send_line("PARSE:dispatch_table=", "text_table");
 		memcpy(text_cmd_buf, trimmed, trimmed_len);
 		text_cmd_buf[trimmed_len] = '\0';
 		rc = dispatch_text_command(text_cmd_buf);
@@ -2801,6 +2891,9 @@ void at_handler_process_line(const char *line, size_t len)
 			emit_final_status(rc);
 			return;
 		}
+		debug_send_line("PARSE:text_table=", "miss");
+	} else {
+		debug_send_line("PARSE:text_table=", "skipped_line_too_long");
 	}
 
 	emit_final_status(-ENOENT);

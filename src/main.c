@@ -37,6 +37,64 @@ static void uart_send_line(const char *str)
 	uart_send_str("\r\n");
 }
 
+static void uart_send_u32(uint32_t value)
+{
+	char buf[11];
+	int i = 0;
+
+	if (value == 0U) {
+		uart_poll_out(uart_dev, '0');
+		return;
+	}
+
+	while (value > 0U && i < (int)sizeof(buf)) {
+		buf[i++] = (char)('0' + (value % 10U));
+		value /= 10U;
+	}
+
+	while (i > 0) {
+		uart_poll_out(uart_dev, (uint8_t)buf[--i]);
+	}
+}
+
+static void uart_send_hex8(uint8_t value)
+{
+	static const char hex[] = "0123456789ABCDEF";
+
+	uart_poll_out(uart_dev, hex[(value >> 4) & 0x0F]);
+	uart_poll_out(uart_dev, hex[value & 0x0F]);
+}
+
+static void debug_send_label(const char *label)
+{
+	uart_send_str("[DBG] ");
+	uart_send_str(label);
+}
+
+static void debug_send_line(const char *label, const char *value)
+{
+	debug_send_label(label);
+	uart_send_line(value);
+}
+
+static void debug_send_u32(const char *label, uint32_t value)
+{
+	debug_send_label(label);
+	uart_send_u32(value);
+	uart_send_str("\r\n");
+}
+
+static void debug_send_rx_line(const char *buf, size_t len)
+{
+	debug_send_label("RX_LINE:");
+
+	for (size_t i = 0; i < len; ++i) {
+		uart_poll_out(uart_dev, (uint8_t)buf[i]);
+	}
+
+	uart_send_str("\r\n");
+}
+
 static bool uart_rx_is_printable(uint8_t ch)
 {
 	return ch >= 0x20U && ch <= 0x7eU;
@@ -146,11 +204,17 @@ int main(void)
 		(void)factory_storage_save(&g_persist);
 	}
 
+	debug_send_u32("BOOT:boot_flag=", g_persist.boot_flag);
+	debug_send_u32("BOOT:led_ready=", g_led_ready ? 1U : 0U);
+
 	update_keywake_boot_state(&g_persist);
 
 	if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
+		debug_send_line("BOOT:path=", "factory_program");
 		run_factory_program();
 	}
+
+	debug_send_line("BOOT:path=", "command_loop");
 
 	at_handler_init(uart_dev, regulator_parent, &g_persist);
 
@@ -165,10 +229,12 @@ int main(void)
 
 		if (uart_poll_in(uart_dev, &ch) == 0) {
 			handled_uart21 = true;
+			uart_poll_out(uart_dev, ch);
 
 			if (ch == '\r' || ch == '\n') {
 				if (cmd_len > 0) {
 					cmd_buf[cmd_len] = '\0';
+					debug_send_rx_line(cmd_buf, cmd_len);
 					at_handler_process_line(cmd_buf, cmd_len);
 					at_handler_run_deferred_action();
 					uart_rx_reset(cmd_buf, &cmd_len);
@@ -177,6 +243,9 @@ int main(void)
 			}
 
 			if (!uart_rx_is_printable(ch)) {
+				debug_send_label("RX_DROP_NONPRINTABLE:0x");
+				uart_send_hex8(ch);
+				uart_send_str("\r\n");
 				uart_rx_reset(cmd_buf, &cmd_len);
 				continue;
 			}
@@ -185,6 +254,7 @@ int main(void)
 				cmd_buf[cmd_len++] = (char)ch;
 			} else {
 				uart_rx_reset(cmd_buf, &cmd_len);
+				debug_send_u32("RX_BUFFER_OVERFLOW:len=", CMD_BUF_SIZE - 1U);
 				uart_send_line("ERROR:BUFFER_OVERFLOW");
 			}
 		}
