@@ -16,6 +16,7 @@
 #define REGULATOR_PARENT_NODE DT_ALIAS(regulator_parent)
 
 #define CMD_BUF_SIZE 160
+#define CMD_IDLE_FLUSH_MS 80
 
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_NODE);
 static const struct device *const uart20_dev = DEVICE_DT_GET_OR_NULL(UART20_NODE);
@@ -25,6 +26,8 @@ static const struct device *const regulator_parent =
 
 static struct factory_persist g_persist;
 static bool g_led_ready;
+static bool g_uart_debug_logging_enabled;
+static bool g_dual_uart_diag_enabled;
 
 static bool uart_rx_is_printable(uint8_t ch);
 static void uart_rx_reset(char *buf, size_t *len);
@@ -50,7 +53,8 @@ static void uart_send_str_dev(const struct device *uart, const char *str)
 static void uart_send_str_all(const char *str)
 {
 	uart_send_str_dev(uart_dev, str);
-	if (uart20_dev != NULL && uart20_dev != uart_dev) {
+	if (g_dual_uart_diag_enabled &&
+	    uart20_dev != NULL && uart20_dev != uart_dev) {
 		uart_send_str_dev(uart20_dev, str);
 	}
 }
@@ -117,6 +121,9 @@ static void uart_send_hex8(uint8_t value)
 
 static void debug_send_label(const char *label)
 {
+	if (!g_uart_debug_logging_enabled) {
+		return;
+	}
 	uart_send_str_all("[DBG] ");
 	uart_send_str_all(label);
 }
@@ -136,6 +143,9 @@ static void debug_send_u32(const char *label, uint32_t value)
 
 static void debug_send_rx_line_tagged(const char *tag, const char *buf, size_t len)
 {
+	if (!g_uart_debug_logging_enabled) {
+		return;
+	}
 	debug_send_label(tag);
 
 	for (size_t i = 0; i < len; ++i) {
@@ -147,45 +157,63 @@ static void debug_send_rx_line_tagged(const char *tag, const char *buf, size_t l
 }
 
 static void process_uart_rx(const struct device *src_uart, const char *tag,
-			    char *buf, size_t *len, bool *handled)
+			    char *buf, size_t *len, int64_t *last_rx_ms,
+			    bool *handled)
 {
 	uint8_t ch;
+	int rc;
 
 	if (src_uart == NULL || !device_is_ready(src_uart)) {
 		return;
 	}
 
-	if (uart_poll_in(src_uart, &ch) != 0) {
-		return;
-	}
+	while ((rc = uart_poll_in(src_uart, &ch)) == 0) {
+		*handled = true;
+		*last_rx_ms = k_uptime_get();
 
-	*handled = true;
-
-	if (ch == '\r' || ch == '\n') {
-		if (*len > 0U) {
-			buf[*len] = '\0';
-			debug_send_rx_line_tagged(tag, buf, *len);
-			at_handler_process_line_from_uart(src_uart, buf, *len);
-			at_handler_run_deferred_action();
-			uart_rx_reset(buf, len);
+		if (ch == '\r' || ch == '\n') {
+			if (*len > 0U) {
+				buf[*len] = '\0';
+				debug_send_rx_line_tagged(tag, buf, *len);
+				at_handler_process_line_from_uart(src_uart, buf, *len);
+				at_handler_run_deferred_action();
+				uart_rx_reset(buf, len);
+			}
+			continue;
 		}
-		return;
+
+		if (!uart_rx_is_printable(ch)) {
+			if (g_uart_debug_logging_enabled) {
+				debug_send_label("RX_DROP_NONPRINTABLE:0x");
+				uart_send_hex8(ch);
+				uart_send_str_all("\r\n");
+			}
+			uart_rx_reset(buf, len);
+			continue;
+		}
+
+		if (*len < (CMD_BUF_SIZE - 1U)) {
+			buf[(*len)++] = (char)ch;
+		} else {
+			uart_rx_reset(buf, len);
+			debug_send_u32("RX_BUFFER_OVERFLOW:len=", CMD_BUF_SIZE - 1U);
+			uart_send_line("ERROR:BUFFER_OVERFLOW");
+		}
 	}
 
-	if (!uart_rx_is_printable(ch)) {
-		debug_send_label("RX_DROP_NONPRINTABLE:0x");
-		uart_send_hex8(ch);
-		uart_send_str_all("\r\n");
+	if (*len > 0U && *last_rx_ms > 0 &&
+	    (k_uptime_get() - *last_rx_ms) >= CMD_IDLE_FLUSH_MS) {
+		buf[*len] = '\0';
+		if (g_uart_debug_logging_enabled) {
+			debug_send_label("RX_IDLE_FLUSH:");
+			uart_send_str_all(tag);
+			uart_send_str_all("\r\n");
+		}
+		debug_send_rx_line_tagged(tag, buf, *len);
+		at_handler_process_line_from_uart(src_uart, buf, *len);
+		at_handler_run_deferred_action();
 		uart_rx_reset(buf, len);
-		return;
-	}
-
-	if (*len < (CMD_BUF_SIZE - 1U)) {
-		buf[(*len)++] = (char)ch;
-	} else {
-		uart_rx_reset(buf, len);
-		debug_send_u32("RX_BUFFER_OVERFLOW:len=", CMD_BUF_SIZE - 1U);
-		uart_send_line("ERROR:BUFFER_OVERFLOW");
+		*last_rx_ms = 0;
 	}
 }
 
@@ -278,16 +306,21 @@ int main(void)
 	char cmd_buf_uart20[CMD_BUF_SIZE];
 	size_t cmd_len_uart21 = 0;
 	size_t cmd_len_uart20 = 0;
+	int64_t last_rx_ms_uart21 = 0;
+	int64_t last_rx_ms_uart20 = 0;
 	int rc;
 
 	uart_rx_reset(cmd_buf_uart21, &cmd_len_uart21);
 	uart_rx_reset(cmd_buf_uart20, &cmd_len_uart20);
+	g_uart_debug_logging_enabled = false;
+	g_dual_uart_diag_enabled = false;
 
 	if (!device_is_ready(uart_dev)) {
 		return 0;
 	}
 
-	if (uart20_dev != NULL && device_is_ready(uart20_dev)) {
+	if (g_dual_uart_diag_enabled &&
+	    uart20_dev != NULL && device_is_ready(uart20_dev)) {
 		const struct uart_config debug_uart20_cfg = {
 			.baudrate = 115200,
 			.parity = UART_CFG_PARITY_NONE,
@@ -336,11 +369,12 @@ int main(void)
 		bool handled_uart = false;
 
 		process_uart_rx(uart_dev, "RX21_LINE:", cmd_buf_uart21,
-			       &cmd_len_uart21, &handled_uart);
+			       &cmd_len_uart21, &last_rx_ms_uart21, &handled_uart);
 
-		if (!at_handler_uart20_service_enabled()) {
+		if (g_dual_uart_diag_enabled && !at_handler_uart20_service_enabled()) {
 			process_uart_rx(uart20_dev, "RX20_LINE:", cmd_buf_uart20,
-				       &cmd_len_uart20, &handled_uart);
+				       &cmd_len_uart20, &last_rx_ms_uart20,
+				       &handled_uart);
 		}
 
 		at_handler_poll_background();

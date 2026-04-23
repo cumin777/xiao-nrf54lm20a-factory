@@ -215,6 +215,8 @@ static const struct device *const g_uart20_dev =
 static bool g_uart20_test_enabled;
 static char g_uart20_rx_buf[FACTORY_UART20_BUF_SIZE];
 static size_t g_uart20_rx_len;
+static bool g_parser_debug_logging_enabled;
+static bool g_multi_uart_output_enabled;
 
 #if defined(CONFIG_BT)
 struct ble_scan_stats {
@@ -244,12 +246,14 @@ static void uart_emit_char(uint8_t ch)
 		uart_poll_out(g_ctx.uart, ch);
 	}
 
-	if (g_ctx.uart_primary != NULL && g_ctx.uart_primary != g_ctx.uart &&
+	if (g_multi_uart_output_enabled &&
+	    g_ctx.uart_primary != NULL && g_ctx.uart_primary != g_ctx.uart &&
 	    device_is_ready(g_ctx.uart_primary)) {
 		uart_poll_out(g_ctx.uart_primary, ch);
 	}
 
-	if (g_uart20_dev != NULL && g_uart20_dev != g_ctx.uart &&
+	if (g_multi_uart_output_enabled &&
+	    g_uart20_dev != NULL && g_uart20_dev != g_ctx.uart &&
 	    g_uart20_dev != g_ctx.uart_primary && device_is_ready(g_uart20_dev)) {
 		uart_poll_out(g_uart20_dev, ch);
 	}
@@ -318,6 +322,9 @@ static void uart_send_s32(int32_t value)
 
 static void debug_send_label(const char *label)
 {
+	if (!g_parser_debug_logging_enabled) {
+		return;
+	}
 	uart_send_str("[DBG] ");
 	uart_send_str(label);
 }
@@ -2743,6 +2750,8 @@ void at_handler_init(const struct device *uart_dev,
 	g_ctx.uart_primary = uart_dev;
 	g_ctx.regulator_parent = regulator_parent;
 	g_ctx.persist = persist;
+	g_parser_debug_logging_enabled = false;
+	g_multi_uart_output_enabled = false;
 	g_adc_initialized = false;
 	g_keywake_ready = false;
 	g_keywake_irq_count = 0;
