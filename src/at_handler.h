@@ -10,6 +10,8 @@ void at_handler_init(const struct device *uart_dev,
 		     const struct device *regulator_parent,
 		     struct factory_persist *persist);
 
+void at_handler_early_init(void);
+
 void at_handler_process_line_from_uart(const struct device *uart_dev,
 				       const char *line, size_t len);
 bool at_handler_uart20_service_enabled(void);

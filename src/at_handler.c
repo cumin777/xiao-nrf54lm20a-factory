@@ -93,7 +93,7 @@
 #define FACTORY_CMD_PARSE_BUF_SIZE 160
 #define FACTORY_TEXT_CMD_MAX_TOKENS 6
 #define FACTORY_UART20_BUF_SIZE 32
-#define FACTORY_IMU_WORKER_STACK_SIZE 3072
+#define FACTORY_IMU_WORKER_STACK_SIZE 4096
 #define FACTORY_IMU_WORKER_PRIORITY K_PRIO_PREEMPT(8)
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 #define ADC_NODE ZEPHYR_USER_NODE
@@ -1184,15 +1184,22 @@ static int at_sample_imu_sync(struct sensor_value *accel_x,
 			      struct sensor_value *gyro_y,
 			      struct sensor_value *gyro_z)
 {
-	int ret;
-
-	ret = at_ensure_imu_ready();
-	if (ret != 0) {
-		return ret;
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	if (!device_is_ready(g_imu_dev)) {
+		return -ENODEV;
 	}
 
 	return at_fetch_imu_sample(accel_x, accel_y, accel_z,
 				   gyro_x, gyro_y, gyro_z);
+#else
+	ARG_UNUSED(accel_x);
+	ARG_UNUSED(accel_y);
+	ARG_UNUSED(accel_z);
+	ARG_UNUSED(gyro_x);
+	ARG_UNUSED(gyro_y);
+	ARG_UNUSED(gyro_z);
+	return -ENODEV;
+#endif
 }
 
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
@@ -1264,6 +1271,8 @@ static int at_get_imu_sample_with_timeout(struct sensor_value *accel_x,
 	rc = k_sem_take(&g_imu_worker_done_sem,
 			K_MSEC(CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS));
 	if (rc != 0) {
+		/* Worker may be stuck; reset busy flag so future calls can retry. */
+		atomic_set(&g_imu_worker_busy, 0);
 		return -ETIMEDOUT;
 	}
 
@@ -2907,6 +2916,25 @@ void at_handler_init(const struct device *uart_dev,
 #if defined(CONFIG_BT)
 	g_ble_text_scan_active = false;
 	at_ble_scan_reset_stats();
+#endif
+}
+
+void at_handler_early_init(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	int ret;
+
+	ret = at_enable_imu_power();
+	if (ret != 0) {
+		return;
+	}
+
+	if (!device_is_ready(g_imu_dev)) {
+		ret = device_init(g_imu_dev);
+		if (ret < 0 && ret != -EALREADY) {
+			return;
+		}
+	}
 #endif
 }
 

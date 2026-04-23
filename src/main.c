@@ -338,6 +338,7 @@ int main(void)
 	debug_send_line("BOOT:path=", "command_loop");
 
 	at_handler_init(uart_dev, regulator_parent, &g_persist);
+	at_handler_early_init();
 
 	uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
 	uart_send_line("UART: UART21 @ 115200");
