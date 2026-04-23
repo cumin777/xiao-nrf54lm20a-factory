@@ -3021,11 +3021,7 @@ void at_handler_process_line_from_uart(const struct device *uart_dev,
 	debug_send_u32("PARSE:trimmed_len=", (uint32_t)trimmed_len);
 	debug_send_span("PARSE:trimmed=", trimmed, trimmed_len);
 
-	if (at_cmd_equals(trimmed, trimmed_len, "AT")) {
-		debug_send_line("PARSE:direct_match=", "AT");
-		uart_send_line("OK");
-		return;
-	}
+	/* Bare "AT" command is no longer handled (V3: text command protocol, not AT framework). */
 
 	if (at_cmd_equals(trimmed, trimmed_len, "AT+HELP")) {
 		debug_send_line("PARSE:direct_match=", "AT+HELP");
@@ -3081,7 +3077,11 @@ void at_handler_process_line_from_uart(const struct device *uart_dev,
 		text_cmd_buf[trimmed_len] = '\0';
 		rc = dispatch_text_command(text_cmd_buf);
 		if (rc != -ENOENT) {
-			emit_final_status(rc);
+			/* V3 text commands use their own response format;
+			 * only emit error status on failure, no trailing OK. */
+			if (rc != 0) {
+				emit_final_status(rc);
+			}
 			return;
 		}
 		debug_send_line("PARSE:text_table=", "miss");
