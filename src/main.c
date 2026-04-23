@@ -22,6 +22,7 @@ static const struct device *const regulator_parent =
 	DEVICE_DT_GET_OR_NULL(REGULATOR_PARENT_NODE);
 
 static struct factory_persist g_persist;
+static bool g_led_ready;
 
 static void uart_send_str(const char *str)
 {
@@ -105,11 +106,15 @@ static void run_factory_program(void)
 	(void)uart_configure(uart_dev, &factory_uart_cfg);
 
 	while (1) {
-		gpio_pin_set_dt(&led, 1);
+		if (g_led_ready) {
+			(void)gpio_pin_set_dt(&led, 1);
+		}
 		uart_send_line("XIAO nRF54LM20A Demo, LED ON");
 		k_msleep(1000);
 
-		gpio_pin_set_dt(&led, 0);
+		if (g_led_ready) {
+			(void)gpio_pin_set_dt(&led, 0);
+		}
 		uart_send_line("XIAO nRF54LM20A Demo, LED OFF");
 		k_msleep(1000);
 	}
@@ -127,13 +132,12 @@ int main(void)
 		return 0;
 	}
 
-	if (!gpio_is_ready_dt(&led)) {
-		return 0;
-	}
-
-	rc = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
-	if (rc != 0) {
-		return 0;
+	g_led_ready = false;
+	if (gpio_is_ready_dt(&led)) {
+		rc = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+		if (rc == 0) {
+			g_led_ready = true;
+		}
 	}
 
 	rc = factory_storage_load(&g_persist);

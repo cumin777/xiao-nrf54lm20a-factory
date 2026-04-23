@@ -1,5 +1,51 @@
 # Factory Test Issues
 
+## UART21 - No response at all after boot
+
+**Status:** Fix implemented
+**Date:** 2026-04-23
+
+### Symptom
+
+On hardware, sending even the simplest commands on `UART21`, such as:
+
+```text
+AT
+imu get
+```
+
+produced no response at all: no banner, no `OK`, no `ERROR:...`.
+
+### Root Cause
+
+`src/main.c` treated the board LED as a hard prerequisite for entering the command loop:
+
+1. If `led0` was not ready, `main()` returned immediately.
+2. If `gpio_pin_configure_dt(&led, ...)` failed, `main()` also returned immediately.
+
+That meant the firmware could exit before:
+
+- printing the startup banner on `UART21`
+- entering the `UART21` RX loop
+- dispatching `AT` / text commands
+
+This failure mode is silent and matches a real-world symptom of "TX sends commands, but the device never replies".
+
+### Applied Fix
+
+- `src/main.c`: Made LED initialization best-effort instead of mandatory.
+- `src/main.c`: Added `g_led_ready` and only toggled the LED inside `run_factory_program()` when the LED was configured successfully.
+- `tests/verify_factory_v3_startup.sh`: Added a regression check to ensure the command loop no longer hard-depends on LED readiness.
+
+### Remaining Checks
+
+If there is still no reply after this fix, verify the following in order:
+
+1. The host is connected to `UART21`, not `UART20`
+2. `boot_flag` is not `2` (otherwise the firmware enters the preserved factory loop)
+3. The host baud rate is `115200 8N1`
+4. The command is terminated with `\r\n`
+
 ## AT Parser - Intermittent ERROR:UNKNOWN_COMMAND
 
 **Status:** Fix implemented, pending repeated hardware verification
