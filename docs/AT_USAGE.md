@@ -68,22 +68,31 @@ OK
 ```
 
 ### 3.5 `bt scan on`
-- 功能：执行一个扫描窗口并输出扫描结果
+- 功能：启动持续扫描会话；收到 `bt scan off` 前不输出扫描摘要
+- 期望反馈示例：
+
+```text
+OK
+```
+
+- 说明：
+  - 当前命令只启动扫描并立即返回 `OK`
+  - 扫描期间统计第一条命中的设备和 RSSI 最强的设备
+  - 最终结果在 `bt scan off` 时统一输出
+
+### 3.6 `bt scan off`
+- 功能：停止当前扫描会话并输出扫描结果（幂等）
 - 期望反馈示例：
 
 ```text
 [DEVICE] AA:BB:CC:DD:EE:FF (random) RSSI -42
-OK
-```
-
-### 3.6 `bt scan off`
-- 功能：停止扫描（幂等）
-- 期望反馈示例：
-
-```text
+[DEVICE] 11:22:33:44:55:66 (random) RSSI -35
 bt scan off
 OK
 ```
+
+- 说明：
+  - 若扫描期间没有命中任何广播包，则只输出 `bt scan off` 和 `OK`
 
 ### 3.7 `sleep mode`
 - 功能：复用现有 `SLEEPI` 深睡流程，`OK` 后进入 system off

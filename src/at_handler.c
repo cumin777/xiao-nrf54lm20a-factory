@@ -188,7 +188,14 @@ struct ble_scan_stats {
 };
 
 static bool g_ble_initialized;
+static bool g_ble_text_scan_active;
 static struct ble_scan_stats g_ble_scan_stats;
+static const struct bt_le_scan_param g_ble_scan_param = {
+	.type = BT_LE_SCAN_TYPE_ACTIVE,
+	.options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+	.interval = BT_GAP_SCAN_FAST_INTERVAL,
+	.window = BT_GAP_SCAN_FAST_WINDOW,
+};
 #endif
 
 static void uart_send_str(const char *s)
@@ -1118,62 +1125,212 @@ static void at_ble_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 }
 #endif
 
-static int at_ble_scan_collect(char *first_addr, size_t first_addr_len,
-			       int32_t *first_rssi, char *best_addr,
-			       size_t best_addr_len, uint32_t *adv_count,
-			       int32_t *best_rssi)
+static void at_ble_scan_reset_stats(void)
 {
 #if defined(CONFIG_BT)
-	struct bt_le_scan_param scan_param = {
-		.type = BT_LE_SCAN_TYPE_ACTIVE,
-		.options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
-		.interval = BT_GAP_SCAN_FAST_INTERVAL,
-		.window = BT_GAP_SCAN_FAST_WINDOW,
-	};
-	int rc;
-	int stop_rc;
+	memset(&g_ble_scan_stats, 0, sizeof(g_ble_scan_stats));
+#endif
+}
 
-	if (first_addr == NULL || best_addr == NULL || first_rssi == NULL ||
-	    adv_count == NULL || best_rssi == NULL) {
-		return -EINVAL;
+static void at_ble_scan_export_stats(char *first_addr, size_t first_addr_len,
+				     int32_t *first_rssi, char *best_addr,
+				     size_t best_addr_len, uint32_t *adv_count,
+				     int32_t *best_rssi)
+{
+#if defined(CONFIG_BT)
+	if (first_addr != NULL && first_addr_len > 0U) {
+		strncpy(first_addr, "none", first_addr_len);
+		first_addr[first_addr_len - 1U] = '\0';
 	}
+
+	if (best_addr != NULL && best_addr_len > 0U) {
+		strncpy(best_addr, "none", best_addr_len);
+		best_addr[best_addr_len - 1U] = '\0';
+	}
+
+	if (first_rssi != NULL) {
+		*first_rssi = -127;
+	}
+
+	if (best_rssi != NULL) {
+		*best_rssi = -127;
+	}
+
+	if (adv_count != NULL) {
+		*adv_count = g_ble_scan_stats.adv_count;
+	}
+
+	if (g_ble_scan_stats.have_first) {
+		if (first_addr != NULL && first_addr_len > 0U) {
+			bt_addr_le_to_str(&g_ble_scan_stats.first_addr, first_addr,
+					  first_addr_len);
+		}
+		if (first_rssi != NULL) {
+			*first_rssi = g_ble_scan_stats.first_rssi;
+		}
+	}
+
+	if (g_ble_scan_stats.have_best) {
+		if (best_addr != NULL && best_addr_len > 0U) {
+			bt_addr_le_to_str(&g_ble_scan_stats.best_addr, best_addr,
+					  best_addr_len);
+		}
+		if (best_rssi != NULL) {
+			*best_rssi = g_ble_scan_stats.best_rssi;
+		}
+	}
+#else
+	ARG_UNUSED(first_addr);
+	ARG_UNUSED(first_addr_len);
+	ARG_UNUSED(first_rssi);
+	ARG_UNUSED(best_addr);
+	ARG_UNUSED(best_addr_len);
+	ARG_UNUSED(adv_count);
+	ARG_UNUSED(best_rssi);
+#endif
+}
+
+static int at_ble_scan_start_session(bool text_session)
+{
+#if defined(CONFIG_BT)
+	int rc;
 
 	rc = at_ble_ensure_ready();
 	if (rc != 0) {
 		return rc;
 	}
 
-	memset(&g_ble_scan_stats, 0, sizeof(g_ble_scan_stats));
-	strcpy(first_addr, "none");
-	strcpy(best_addr, "none");
-	*first_rssi = -127;
-	*best_rssi = -127;
-	*adv_count = 0U;
+	if (text_session && g_ble_text_scan_active) {
+		return 0;
+	}
 
-	rc = bt_le_scan_start(&scan_param, at_ble_scan_cb);
+	if (!text_session && g_ble_text_scan_active) {
+		return -EBUSY;
+	}
+
+	at_ble_scan_reset_stats();
+	rc = bt_le_scan_start(&g_ble_scan_param, at_ble_scan_cb);
+	if (rc == -EALREADY) {
+		return text_session && g_ble_text_scan_active ? 0 : -EBUSY;
+	}
+
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	if (text_session) {
+		g_ble_text_scan_active = true;
+	}
+
+	return 0;
+#else
+	ARG_UNUSED(text_session);
+	return -ENODEV;
+#endif
+}
+
+static int at_ble_scan_stop_session(char *first_addr, size_t first_addr_len,
+				    int32_t *first_rssi, char *best_addr,
+				    size_t best_addr_len, uint32_t *adv_count,
+				    int32_t *best_rssi)
+{
+#if defined(CONFIG_BT)
+	int rc = 0;
+
+	if (!g_ble_text_scan_active) {
+		if (first_addr != NULL && first_addr_len > 0U) {
+			strncpy(first_addr, "none", first_addr_len);
+			first_addr[first_addr_len - 1U] = '\0';
+		}
+		if (best_addr != NULL && best_addr_len > 0U) {
+			strncpy(best_addr, "none", best_addr_len);
+			best_addr[best_addr_len - 1U] = '\0';
+		}
+		if (first_rssi != NULL) {
+			*first_rssi = -127;
+		}
+		if (best_rssi != NULL) {
+			*best_rssi = -127;
+		}
+		if (adv_count != NULL) {
+			*adv_count = 0U;
+		}
+		return 0;
+	}
+
+	rc = bt_le_scan_stop();
 	if (rc != 0 && rc != -EALREADY) {
 		return -ENODEV;
 	}
 
+	g_ble_text_scan_active = false;
+	at_ble_scan_export_stats(first_addr, first_addr_len, first_rssi,
+				 best_addr, best_addr_len, adv_count,
+				 best_rssi);
+	at_ble_scan_reset_stats();
+	return 0;
+#else
+	ARG_UNUSED(first_addr);
+	ARG_UNUSED(first_addr_len);
+	ARG_UNUSED(first_rssi);
+	ARG_UNUSED(best_addr);
+	ARG_UNUSED(best_addr_len);
+	ARG_UNUSED(adv_count);
+	ARG_UNUSED(best_rssi);
+	return -ENODEV;
+#endif
+}
+
+static void emit_text_ble_scan_results(const char *first_addr, int32_t first_rssi,
+				       const char *best_addr, int32_t best_rssi,
+				       uint32_t adv_count)
+{
+	if (adv_count == 0U) {
+		return;
+	}
+
+	uart_send_str("[DEVICE] ");
+	uart_send_str(first_addr);
+	uart_send_str(" RSSI ");
+	uart_send_s32(first_rssi);
+	uart_send_str("\r\n");
+
+	if (strcmp(best_addr, first_addr) != 0) {
+		uart_send_str("[DEVICE] ");
+		uart_send_str(best_addr);
+		uart_send_str(" RSSI ");
+		uart_send_s32(best_rssi);
+		uart_send_str("\r\n");
+	}
+}
+
+static int at_ble_scan_collect(char *first_addr, size_t first_addr_len,
+			       int32_t *first_rssi, char *best_addr,
+			       size_t best_addr_len, uint32_t *adv_count,
+			       int32_t *best_rssi)
+{
+#if defined(CONFIG_BT)
+	int rc;
+
+	if (first_addr == NULL || best_addr == NULL || first_rssi == NULL ||
+	    adv_count == NULL || best_rssi == NULL) {
+		return -EINVAL;
+	}
+
+	rc = at_ble_scan_start_session(false);
+	if (rc != 0) {
+		return rc;
+	}
+
 	k_msleep(CONFIG_FACTORY_BLE_SCAN_WINDOW_MS);
-	stop_rc = bt_le_scan_stop();
-	if (stop_rc != 0 && stop_rc != -EALREADY) {
+	rc = bt_le_scan_stop();
+	if (rc != 0 && rc != -EALREADY) {
 		return -ENODEV;
 	}
 
-	if (g_ble_scan_stats.have_first) {
-		bt_addr_le_to_str(&g_ble_scan_stats.first_addr, first_addr,
-				  first_addr_len);
-		*first_rssi = g_ble_scan_stats.first_rssi;
-	}
-
-	if (g_ble_scan_stats.have_best) {
-		bt_addr_le_to_str(&g_ble_scan_stats.best_addr, best_addr,
-				  best_addr_len);
-		*best_rssi = g_ble_scan_stats.best_rssi;
-	}
-
-	*adv_count = g_ble_scan_stats.adv_count;
+	at_ble_scan_export_stats(first_addr, first_addr_len, first_rssi,
+				 best_addr, best_addr_len, adv_count,
+				 best_rssi);
 	return 0;
 #else
 	ARG_UNUSED(first_addr);
@@ -2030,6 +2187,12 @@ static int text_handle_bt_init(void)
 
 static int text_handle_bt_scan_on(void)
 {
+	return at_ble_scan_start_session(true);
+}
+
+static int text_handle_bt_scan_off(void)
+{
+#if defined(CONFIG_BT)
 	char first_addr[BT_ADDR_LE_STR_LEN] = "none";
 	char best_addr[BT_ADDR_LE_STR_LEN] = "none";
 	int32_t first_rssi = -127;
@@ -2037,44 +2200,15 @@ static int text_handle_bt_scan_on(void)
 	uint32_t adv_count = 0U;
 	int rc;
 
-	rc = at_ble_scan_collect(first_addr, sizeof(first_addr), &first_rssi,
-				 best_addr, sizeof(best_addr), &adv_count,
-				 &best_rssi);
+	rc = at_ble_scan_stop_session(first_addr, sizeof(first_addr), &first_rssi,
+				      best_addr, sizeof(best_addr), &adv_count,
+				      &best_rssi);
 	if (rc != 0) {
 		return rc;
 	}
 
-	if (adv_count > 0U) {
-		uart_send_str("[DEVICE] ");
-		uart_send_str(first_addr);
-		uart_send_str(" RSSI ");
-		uart_send_s32(first_rssi);
-		uart_send_str("\r\n");
-
-		if (strcmp(best_addr, first_addr) != 0) {
-			uart_send_str("[DEVICE] ");
-			uart_send_str(best_addr);
-			uart_send_str(" RSSI ");
-			uart_send_s32(best_rssi);
-			uart_send_str("\r\n");
-		}
-	}
-
-	return 0;
-}
-
-static int text_handle_bt_scan_off(void)
-{
-#if defined(CONFIG_BT)
-	int rc = 0;
-
-	if (g_ble_initialized) {
-		rc = bt_le_scan_stop();
-		if (rc != 0 && rc != -EALREADY) {
-			return -ENODEV;
-		}
-	}
-
+	emit_text_ble_scan_results(first_addr, first_rssi, best_addr, best_rssi,
+				   adv_count);
 	uart_send_line("bt scan off");
 	return 0;
 #else
@@ -2321,6 +2455,10 @@ void at_handler_init(const struct device *uart_dev,
 	g_keywake_ready = false;
 	g_keywake_irq_count = 0;
 	g_sleepi_system_off_pending = false;
+#if defined(CONFIG_BT)
+	g_ble_text_scan_active = false;
+	at_ble_scan_reset_stats();
+#endif
 }
 
 void at_handler_run_deferred_action(void)
