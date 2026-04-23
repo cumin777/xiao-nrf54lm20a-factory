@@ -87,6 +87,7 @@
 #define FACTORY_ADC_CHANNEL_COUNT 8
 #define FACTORY_CMD_PARSE_BUF_SIZE 160
 #define FACTORY_TEXT_CMD_MAX_TOKENS 6
+#define FACTORY_UART20_BUF_SIZE 32
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 #define ADC_NODE ZEPHYR_USER_NODE
 
@@ -175,6 +176,12 @@ static const struct device *const g_gpio2_dev =
 	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio2));
 static const struct device *const g_gpio3_dev =
 	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio3));
+static const struct device *const g_uart20_dev =
+	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(uart20));
+
+static bool g_uart20_test_enabled;
+static char g_uart20_rx_buf[FACTORY_UART20_BUF_SIZE];
+static size_t g_uart20_rx_len;
 
 #if defined(CONFIG_BT)
 struct ble_scan_stats {
@@ -209,6 +216,23 @@ static void uart_send_line(const char *s)
 {
 	uart_send_str(s);
 	uart_send_str("\r\n");
+}
+
+static void uart_send_str_dev(const struct device *uart, const char *s)
+{
+	if (uart == NULL) {
+		return;
+	}
+
+	while (*s != '\0') {
+		uart_poll_out(uart, (uint8_t)*s++);
+	}
+}
+
+static void uart_send_line_dev(const struct device *uart, const char *s)
+{
+	uart_send_str_dev(uart, s);
+	uart_send_str_dev(uart, "\r\n");
 }
 
 static void uart_send_u32(uint32_t value)
@@ -572,6 +596,45 @@ static int at_handle_uartloop(void)
 
 	emit_testdata("STATE1", "UARTLOOP", "1", "bool", "uart21_ready",
 		      "baud:115200");
+	return 0;
+}
+
+static void uart20_rx_reset(void)
+{
+	g_uart20_rx_buf[0] = '\0';
+	g_uart20_rx_len = 0U;
+}
+
+static int at_enable_uart20_test(void)
+{
+	static const struct uart_config uart20_cfg = {
+		.baudrate = 115200,
+		.parity = UART_CFG_PARITY_NONE,
+		.stop_bits = UART_CFG_STOP_BITS_1,
+		.data_bits = UART_CFG_DATA_BITS_8,
+		.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
+	};
+	int rc;
+
+	if (g_uart20_dev == NULL || !device_is_ready(g_uart20_dev)) {
+		emit_testdata("STATE1", "UART20TEST", "0", "bool",
+			      "uart20_not_ready", "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	rc = uart_configure(g_uart20_dev, &uart20_cfg);
+	if (rc != 0) {
+		emit_testdata("STATE1", "UART20TEST", "0", "bool",
+			      "uart20_config_failed", "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	g_uart20_test_enabled = true;
+	uart20_rx_reset();
+
+	emit_testdata("STATE1", "UART20TEST", "1", "bool",
+		      "uart20_test_enabled",
+		      "uart:uart20;trigger:whoami;reply:NRF54LM20A");
 	return 0;
 }
 
@@ -1960,6 +2023,7 @@ static const struct at_cmd g_item_cmds[] = {
 	{ "AT+VBUS", at_handle_vbus },
 	{ "AT+V3P3", at_handle_v3p3 },
 	{ "AT+UARTLOOP", at_handle_uartloop },
+	{ "AT+UART20TEST", at_enable_uart20_test },
 	{ "AT+CHGCUR", at_handle_chgcur },
 	{ "AT+BATV", at_handle_batv },
 	{ "AT+BLESCAN", at_handle_blescan },
@@ -1992,10 +2056,10 @@ static const struct at_cmd g_state_cmds[] = {
 static int at_handle_help(void)
 {
 	uart_send_line("+CMDS:text:help,gpio set/get,bt init,bt scan on/off,sleep mode,ship mode");
-	uart_send_line("+CMDS:text:mic capture <sec>,imu get/off,flash <0-255>,bat get");
+	uart_send_line("+CMDS:text:mic capture <sec>,imu get/off,flash <0-255>,bat get,uart20 on");
 	uart_send_line("+CMDS:AT,AT+HELP,AT+FLASH?,AT+FLASH=<0|1|2>,AT+THRESH?");
 	uart_send_line("+CMDS:AT+STATE1..AT+STATE7,AT+STATE8A,AT+STATE8B,AT+STATE9B");
-	uart_send_line("+CMDS:AT+VBUS,AT+V3P3,AT+UARTLOOP,AT+CHGCUR,AT+BATV");
+	uart_send_line("+CMDS:AT+VBUS,AT+V3P3,AT+UARTLOOP,AT+UART20TEST,AT+CHGCUR,AT+BATV");
 	uart_send_line("+CMDS:AT+BLESCAN,AT+GPIOLOOP,AT+NFCLOOP,AT+IMU6D,AT+MICAMP");
 	uart_send_line("+CMDS:AT+SLEEPI,AT+KEYWAKE,AT+FLASHWRITE,AT+SHIPMODEA,AT+VBUS_B,AT+V3P3_B,AT+SHIPMODEB");
 	return 0;
@@ -2364,6 +2428,17 @@ static int text_handle_bat_get(void)
 	return 0;
 }
 
+static int text_handle_uart20_on(void)
+{
+	int rc = at_enable_uart20_test();
+
+	if (rc == 0) {
+		uart_send_line("uart20 on");
+	}
+
+	return rc;
+}
+
 static int dispatch_text_command(char *cmd_buf)
 {
 	char *argv[FACTORY_TEXT_CMD_MAX_TOKENS] = { 0 };
@@ -2441,6 +2516,11 @@ static int dispatch_text_command(char *cmd_buf)
 		return text_handle_bat_get();
 	}
 
+	if (argc == 2 && strcmp(argv[0], "uart20") == 0 &&
+	    strcmp(argv[1], "on") == 0) {
+		return text_handle_uart20_on();
+	}
+
 	return -ENOENT;
 }
 
@@ -2455,10 +2535,46 @@ void at_handler_init(const struct device *uart_dev,
 	g_keywake_ready = false;
 	g_keywake_irq_count = 0;
 	g_sleepi_system_off_pending = false;
+	g_uart20_test_enabled = false;
+	uart20_rx_reset();
 #if defined(CONFIG_BT)
 	g_ble_text_scan_active = false;
 	at_ble_scan_reset_stats();
 #endif
+}
+
+void at_handler_poll_background(void)
+{
+	uint8_t ch;
+
+	if (!g_uart20_test_enabled || g_uart20_dev == NULL ||
+	    !device_is_ready(g_uart20_dev)) {
+		return;
+	}
+
+	while (uart_poll_in(g_uart20_dev, &ch) == 0) {
+		if (ch == '\r' || ch == '\n') {
+			if (g_uart20_rx_len > 0U) {
+				g_uart20_rx_buf[g_uart20_rx_len] = '\0';
+				if (strcmp(g_uart20_rx_buf, "whoami") == 0) {
+					uart_send_line_dev(g_uart20_dev, "NRF54LM20A");
+				}
+				uart20_rx_reset();
+			}
+			continue;
+		}
+
+		if (ch < 0x20U || ch > 0x7eU) {
+			uart20_rx_reset();
+			continue;
+		}
+
+		if (g_uart20_rx_len < (FACTORY_UART20_BUF_SIZE - 1U)) {
+			g_uart20_rx_buf[g_uart20_rx_len++] = (char)ch;
+		} else {
+			uart20_rx_reset();
+		}
+	}
 }
 
 void at_handler_run_deferred_action(void)

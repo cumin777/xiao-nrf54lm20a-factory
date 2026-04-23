@@ -157,8 +157,11 @@ int main(void)
 
 	while (1) {
 		uint8_t ch;
+		bool handled_uart21 = false;
 
 		if (uart_poll_in(uart_dev, &ch) == 0) {
+			handled_uart21 = true;
+
 			if (ch == '\r' || ch == '\n') {
 				if (cmd_len > 0) {
 					cmd_buf[cmd_len] = '\0';
@@ -180,7 +183,11 @@ int main(void)
 				uart_rx_reset(cmd_buf, &cmd_len);
 				uart_send_line("ERROR:BUFFER_OVERFLOW");
 			}
-		} else {
+		}
+
+		at_handler_poll_background();
+
+		if (!handled_uart21) {
 			k_usleep(100);
 		}
 	}

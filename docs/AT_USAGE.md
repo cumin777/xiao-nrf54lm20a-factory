@@ -161,6 +161,31 @@ bat:4012mv
 OK
 ```
 
+### 3.14 `uart20 on`
+- 功能：开启 USB 通路上的 `UART20` 通信测试服务
+- 行为：
+  - 本命令通过 `UART21` 发送
+  - 命令成功后，固件会保持监听 `UART20`
+  - 当 `UART20` 收到 `whoami\r\n` 时，固件在 `UART20` 回复 `NRF54LM20A\r\n`
+- 期望反馈示例（`UART21`）：
+
+```text
++TESTDATA:STATE1,ITEM=UART20TEST,VALUE=1,UNIT=bool,RAW=uart20_test_enabled,META=uart:uart20;trigger:whoami;reply:NRF54LM20A
+uart20 on
+OK
+```
+
+- 期望反馈示例（`UART20`）：
+
+```text
+NRF54LM20A
+```
+
+- 前置条件：
+  - 板级 `uart20` 已启用
+  - USB 端通路已经连接到待测板 `uart20`
+  - `UART20` 当前波特率为 `115200 8N1`
+
 ## 4. 基础系统 AT 指令（兼容接口）
 
 ### 4.1 `AT`
@@ -230,6 +255,15 @@ OK
 
 ```text
 +TESTDATA:STATE1,ITEM=3V3,VALUE=<mV>,UNIT=mV,RAW=<adc_raw>,META=ch:<idx>;ref_mv:<cfg>
+OK
+```
+
+#### `AT+UART20TEST`
+- 功能：开启 `UART20` `whoami -> NRF54LM20A` 通信测试服务
+- 期望反馈（成功）：
+
+```text
++TESTDATA:STATE1,ITEM=UART20TEST,VALUE=1,UNIT=bool,RAW=uart20_test_enabled,META=uart:uart20;trigger:whoami;reply:NRF54LM20A
 OK
 ```
 
