@@ -44,9 +44,10 @@ the device appears to crash or stop responding.
 
 ## 2. `imu get` may hang inside the IMU sampling path
 
-- Status: Open
+- Status: Mitigated
 - Priority: High
 - Report Date: 2026-04-23
+- Mitigation Date: 2026-04-23
 
 ### Symptom
 
@@ -84,6 +85,7 @@ and then no further response was observed.
 
 ### Planned Follow-up
 
-- Add minimal pre/post markers around `at_ensure_imu_ready()` and `at_fetch_imu_sample()`
-- Determine whether the block happens in regulator enable, deferred `device_init()`, or sensor fetch
-- Decide whether to add timeout/error fallback around IMU access
+- `imu get` and `AT+IMU6D` now execute IMU sampling in a dedicated worker thread and wait only up to `CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS`.
+- If the IMU path blocks, UART21 returns `ERROR:HW_TIMEOUT` / `ERROR:HW_BUSY` on subsequent attempts instead of blocking the main command loop.
+- The text response format was corrected to `accel data:<x>,<y>,<z>\rgyro data: <gx>,<gy>,<gz>\r\n`.
+- Remaining hardware follow-up: collect one real-board `imu get` log to confirm whether the underlying IMU path completes normally or still times out.

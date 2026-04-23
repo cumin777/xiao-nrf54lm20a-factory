@@ -32,13 +32,6 @@ static bool g_dual_uart_diag_enabled;
 static bool uart_rx_is_printable(uint8_t ch);
 static void uart_rx_reset(char *buf, size_t *len);
 
-static void uart_send_str(const char *str)
-{
-	while (*str) {
-		uart_poll_out(uart_dev, (uint8_t)*str++);
-	}
-}
-
 static void uart_send_str_dev(const struct device *uart, const char *str)
 {
 	if (uart == NULL || !device_is_ready(uart)) {
@@ -63,26 +56,6 @@ static void uart_send_line(const char *str)
 {
 	uart_send_str_all(str);
 	uart_send_str_all("\r\n");
-}
-
-static void uart_send_u32(uint32_t value)
-{
-	char buf[11];
-	int i = 0;
-
-	if (value == 0U) {
-		uart_poll_out(uart_dev, '0');
-		return;
-	}
-
-	while (value > 0U && i < (int)sizeof(buf)) {
-		buf[i++] = (char)('0' + (value % 10U));
-		value /= 10U;
-	}
-
-	while (i > 0) {
-		uart_poll_out(uart_dev, (uint8_t)buf[--i]);
-	}
 }
 
 static void uart_send_u32_all(uint32_t value)
@@ -130,12 +103,18 @@ static void debug_send_label(const char *label)
 
 static void debug_send_line(const char *label, const char *value)
 {
+	if (!g_uart_debug_logging_enabled) {
+		return;
+	}
 	debug_send_label(label);
 	uart_send_line(value);
 }
 
 static void debug_send_u32(const char *label, uint32_t value)
 {
+	if (!g_uart_debug_logging_enabled) {
+		return;
+	}
 	debug_send_label(label);
 	uart_send_u32_all(value);
 	uart_send_str_all("\r\n");

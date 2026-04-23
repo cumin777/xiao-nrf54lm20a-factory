@@ -20,6 +20,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/sys/poweroff.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include "factory_storage.h"
@@ -84,10 +85,16 @@
 #define CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS 1000
 #endif
 
+#ifndef CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS
+#define CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS 800
+#endif
+
 #define FACTORY_ADC_CHANNEL_COUNT 8
 #define FACTORY_CMD_PARSE_BUF_SIZE 160
 #define FACTORY_TEXT_CMD_MAX_TOKENS 6
 #define FACTORY_UART20_BUF_SIZE 32
+#define FACTORY_IMU_WORKER_STACK_SIZE 3072
+#define FACTORY_IMU_WORKER_PRIORITY K_PRIO_PREEMPT(8)
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 #define ADC_NODE ZEPHYR_USER_NODE
 
@@ -119,6 +126,16 @@ struct gpio_text_pair_desc {
 struct gpio_text_pair_state {
 	bool configured;
 	uint8_t output_idx;
+};
+
+struct imu_sample_values {
+	struct sensor_value accel_x;
+	struct sensor_value accel_y;
+	struct sensor_value accel_z;
+	struct sensor_value gyro_x;
+	struct sensor_value gyro_y;
+	struct sensor_value gyro_z;
+	int rc;
 };
 
 static struct at_ctx g_ctx;
@@ -167,6 +184,15 @@ static bool g_sleepi_system_off_pending;
 
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
 static const struct device *const g_imu_dev = DEVICE_DT_GET(DT_ALIAS(imu0));
+K_THREAD_STACK_DEFINE(g_imu_worker_stack, FACTORY_IMU_WORKER_STACK_SIZE);
+static struct k_thread g_imu_worker_thread;
+static struct imu_sample_values g_imu_worker_result;
+static struct k_sem g_imu_worker_start_sem;
+static struct k_sem g_imu_worker_done_sem;
+static atomic_t g_imu_worker_started;
+static atomic_t g_imu_worker_busy;
+static atomic_t g_imu_worker_request_id;
+static atomic_t g_imu_worker_done_id;
 #endif
 
 #if DT_NODE_EXISTS(DT_ALIAS(dmic20))
@@ -459,6 +485,10 @@ static const char *error_reason_from_rc(int rc)
 		return "INVALID_PARAM";
 	case -ENODEV:
 		return "HW_NOT_READY";
+	case -EBUSY:
+		return "HW_BUSY";
+	case -ETIMEDOUT:
+		return "HW_TIMEOUT";
 	case -EACCES:
 		return "PRECONDITION_NOT_MET";
 	case -EIO:
@@ -1147,6 +1177,119 @@ static int at_fetch_imu_sample(struct sensor_value *accel_x,
 #endif
 }
 
+static int at_sample_imu_sync(struct sensor_value *accel_x,
+			      struct sensor_value *accel_y,
+			      struct sensor_value *accel_z,
+			      struct sensor_value *gyro_x,
+			      struct sensor_value *gyro_y,
+			      struct sensor_value *gyro_z)
+{
+	int ret;
+
+	ret = at_ensure_imu_ready();
+	if (ret != 0) {
+		return ret;
+	}
+
+	return at_fetch_imu_sample(accel_x, accel_y, accel_z,
+				   gyro_x, gyro_y, gyro_z);
+}
+
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+static void at_imu_worker_thread_fn(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	while (1) {
+		atomic_val_t request_id;
+
+		(void)k_sem_take(&g_imu_worker_start_sem, K_FOREVER);
+		request_id = atomic_get(&g_imu_worker_request_id);
+
+		g_imu_worker_result.rc =
+			at_sample_imu_sync(&g_imu_worker_result.accel_x,
+					   &g_imu_worker_result.accel_y,
+					   &g_imu_worker_result.accel_z,
+					   &g_imu_worker_result.gyro_x,
+					   &g_imu_worker_result.gyro_y,
+					   &g_imu_worker_result.gyro_z);
+
+		atomic_set(&g_imu_worker_done_id, request_id);
+		atomic_set(&g_imu_worker_busy, 0);
+		k_sem_give(&g_imu_worker_done_sem);
+	}
+}
+
+static void at_ensure_imu_worker_started(void)
+{
+	if (!atomic_cas(&g_imu_worker_started, 0, 1)) {
+		return;
+	}
+
+	k_sem_init(&g_imu_worker_start_sem, 0, 1);
+	k_sem_init(&g_imu_worker_done_sem, 0, 1);
+	(void)k_thread_create(&g_imu_worker_thread, g_imu_worker_stack,
+			      K_THREAD_STACK_SIZEOF(g_imu_worker_stack),
+			      at_imu_worker_thread_fn, NULL, NULL, NULL,
+			      FACTORY_IMU_WORKER_PRIORITY, 0, K_NO_WAIT);
+}
+#endif
+
+static int at_get_imu_sample_with_timeout(struct sensor_value *accel_x,
+					  struct sensor_value *accel_y,
+					  struct sensor_value *accel_z,
+					  struct sensor_value *gyro_x,
+					  struct sensor_value *gyro_y,
+					  struct sensor_value *gyro_z)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	atomic_val_t request_id;
+	int rc;
+
+	at_ensure_imu_worker_started();
+
+	if (!atomic_cas(&g_imu_worker_busy, 0, 1)) {
+		return -EBUSY;
+	}
+
+	while (k_sem_take(&g_imu_worker_done_sem, K_NO_WAIT) == 0) {
+	}
+
+	request_id = atomic_get(&g_imu_worker_request_id) + 1;
+	atomic_set(&g_imu_worker_request_id, request_id);
+	k_sem_give(&g_imu_worker_start_sem);
+
+	rc = k_sem_take(&g_imu_worker_done_sem,
+			K_MSEC(CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS));
+	if (rc != 0) {
+		return -ETIMEDOUT;
+	}
+
+	if (atomic_get(&g_imu_worker_done_id) != request_id) {
+		return -ETIMEDOUT;
+	}
+
+	*accel_x = g_imu_worker_result.accel_x;
+	*accel_y = g_imu_worker_result.accel_y;
+	*accel_z = g_imu_worker_result.accel_z;
+	*gyro_x = g_imu_worker_result.gyro_x;
+	*gyro_y = g_imu_worker_result.gyro_y;
+	*gyro_z = g_imu_worker_result.gyro_z;
+
+	return g_imu_worker_result.rc;
+#else
+	ARG_UNUSED(accel_x);
+	ARG_UNUSED(accel_y);
+	ARG_UNUSED(accel_z);
+	ARG_UNUSED(gyro_x);
+	ARG_UNUSED(gyro_y);
+	ARG_UNUSED(gyro_z);
+	return -ENODEV;
+#endif
+}
+
 static int at_enable_dmic_power(void)
 {
 	int ret;
@@ -1674,19 +1817,12 @@ static int at_handle_imu6d(void)
 	struct sensor_value gyro_x, gyro_y, gyro_z;
 	int rc;
 
-	rc = at_ensure_imu_ready();
+	rc = at_get_imu_sample_with_timeout(&accel_x, &accel_y, &accel_z,
+					    &gyro_x, &gyro_y, &gyro_z);
 	if (rc != 0) {
 		emit_testdata("STATE4", "IMU6D", "0", "sample", "imu_not_ready",
-			      "err:HW_NOT_READY");
-		return -ENODEV;
-	}
-
-	rc = at_fetch_imu_sample(&accel_x, &accel_y, &accel_z,
-				 &gyro_x, &gyro_y, &gyro_z);
-	if (rc != 0) {
-		emit_testdata("STATE4", "IMU6D", "0", "sample", "sample_fetch_failed",
-			      "err:HW_NOT_READY");
-		return -ENODEV;
+			      "err:HW_NOT_READY_OR_TIMEOUT");
+		return rc;
 	}
 
 	uart_send_str("+TESTDATA:STATE4,ITEM=IMU6D,VALUE=1,UNIT=sample,RAW=ax_u:");
@@ -2537,15 +2673,10 @@ static int text_handle_imu_get(void)
 	struct sensor_value gyro_x, gyro_y, gyro_z;
 	int rc;
 
-	rc = at_ensure_imu_ready();
+	rc = at_get_imu_sample_with_timeout(&accel_x, &accel_y, &accel_z,
+					    &gyro_x, &gyro_y, &gyro_z);
 	if (rc != 0) {
-		return -ENODEV;
-	}
-
-	rc = at_fetch_imu_sample(&accel_x, &accel_y, &accel_z,
-				 &gyro_x, &gyro_y, &gyro_z);
-	if (rc != 0) {
-		return -ENODEV;
+		return rc;
 	}
 
 	uart_send_str("accel data:");
@@ -2554,9 +2685,9 @@ static int text_handle_imu_get(void)
 	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_y));
 	uart_send_str(",");
 	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_z));
-	uart_send_str("\r\n");
+	uart_send_str("\r");
 
-	uart_send_str("gyro data:");
+	uart_send_str("gyro data: ");
 	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_x));
 	uart_send_str(",");
 	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_y));
@@ -2654,11 +2785,13 @@ static int dispatch_text_command(char *cmd_buf)
 		return -ENOENT;
 	}
 
-	for (int i = 0; i < argc; ++i) {
-		debug_send_label("PARSE:text_argv[");
-		uart_send_u32((uint32_t)i);
-		uart_send_str("]=");
-		uart_send_line(argv[i]);
+	if (g_parser_debug_logging_enabled) {
+		for (int i = 0; i < argc; ++i) {
+			debug_send_label("PARSE:text_argv[");
+			uart_send_u32((uint32_t)i);
+			uart_send_str("]=");
+			uart_send_line(argv[i]);
+		}
 	}
 
 	if (argc == 1 && strcmp(argv[0], "help") == 0) {

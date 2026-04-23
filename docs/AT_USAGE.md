@@ -156,10 +156,11 @@ OK
 - 期望反馈示例：
 
 ```text
-accel data:0.012345,-0.023456,9.801234
-gyro data:0.001111,-0.002222,0.003333
+accel data:0.012345,-0.023456,9.801234\rgyro data: 0.001111,-0.002222,0.003333
 OK
 ```
+
+- 失败反馈：若 IMU 驱动或 I2C 访问未能在 `CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS` 内返回，命令循环继续运行并输出 `ERROR:HW_TIMEOUT`。
 
 ### 3.11 `imu off`
 - 功能：兼容治具停止采样命令
