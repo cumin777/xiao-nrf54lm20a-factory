@@ -331,12 +331,18 @@ static void debug_send_label(const char *label)
 
 static void debug_send_line(const char *label, const char *value)
 {
+	if (!g_parser_debug_logging_enabled) {
+		return;
+	}
 	debug_send_label(label);
 	uart_send_line(value);
 }
 
 static void debug_send_span(const char *label, const char *value, size_t len)
 {
+	if (!g_parser_debug_logging_enabled) {
+		return;
+	}
 	debug_send_label(label);
 	for (size_t i = 0; i < len; ++i) {
 		uart_emit_char((uint8_t)value[i]);
@@ -346,6 +352,9 @@ static void debug_send_span(const char *label, const char *value, size_t len)
 
 static void debug_send_u32(const char *label, uint32_t value)
 {
+	if (!g_parser_debug_logging_enabled) {
+		return;
+	}
 	debug_send_label(label);
 	uart_send_u32(value);
 	uart_send_str("\r\n");
@@ -353,6 +362,9 @@ static void debug_send_u32(const char *label, uint32_t value)
 
 static void debug_send_s32(const char *label, int32_t value)
 {
+	if (!g_parser_debug_logging_enabled) {
+		return;
+	}
 	debug_send_label(label);
 	uart_send_s32(value);
 	uart_send_str("\r\n");
