@@ -229,7 +229,6 @@ int main(void)
 
 		if (uart_poll_in(uart_dev, &ch) == 0) {
 			handled_uart21 = true;
-			uart_poll_out(uart_dev, ch);
 
 			if (ch == '\r' || ch == '\n') {
 				if (cmd_len > 0) {
