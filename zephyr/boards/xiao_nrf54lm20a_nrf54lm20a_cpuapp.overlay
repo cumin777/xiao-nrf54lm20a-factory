@@ -1,3 +1,7 @@
+&gpio3 {
+	status = "okay";
+};
+
 &uart21 {
 	current-speed = <115200>;
 	status = "okay";
