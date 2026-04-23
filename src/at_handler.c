@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -84,6 +85,8 @@
 #endif
 
 #define FACTORY_ADC_CHANNEL_COUNT 8
+#define FACTORY_CMD_PARSE_BUF_SIZE 160
+#define FACTORY_TEXT_CMD_MAX_TOKENS 6
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 #define ADC_NODE ZEPHYR_USER_NODE
 
@@ -91,6 +94,15 @@ struct at_ctx {
 	const struct device *uart;
 	const struct device *regulator_parent;
 	struct factory_persist *persist;
+};
+
+struct mic_capture_stats {
+	int32_t min_sample;
+	int32_t max_sample;
+	int32_t peak_abs;
+	int32_t avg_abs;
+	uint32_t max_consecutive;
+	uint32_t sample_count;
 };
 
 static struct at_ctx g_ctx;
@@ -155,10 +167,14 @@ static const struct device *const g_ext_flash_bus_dev =
 	DEVICE_DT_GET(DT_BUS(DT_NODELABEL(py25q64)));
 #endif
 
-#if DT_NODE_EXISTS(DT_NODELABEL(gpio2))
+static const struct device *const g_gpio0_dev =
+	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio0));
+static const struct device *const g_gpio1_dev =
+	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio1));
 static const struct device *const g_gpio2_dev =
-	DEVICE_DT_GET(DT_NODELABEL(gpio2));
-#endif
+	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio2));
+static const struct device *const g_gpio3_dev =
+	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio3));
 
 #if defined(CONFIG_BT)
 struct ble_scan_stats {
@@ -328,6 +344,120 @@ static void emit_final_status(int rc)
 
 	uart_send_str("ERROR:");
 	uart_send_line(error_reason_from_rc(rc));
+}
+
+static bool parse_u32_token(const char *token, uint32_t *value)
+{
+	uint32_t acc = 0U;
+
+	if (token == NULL || *token == '\0' || value == NULL) {
+		return false;
+	}
+
+	for (const char *p = token; *p != '\0'; ++p) {
+		if (!isdigit((unsigned char)*p)) {
+			return false;
+		}
+
+		acc = (acc * 10U) + (uint32_t)(*p - '0');
+	}
+
+	*value = acc;
+	return true;
+}
+
+static bool parse_gpio_group_token(const char *token, uint32_t *group)
+{
+	if (token == NULL || group == NULL) {
+		return false;
+	}
+
+	if (strncmp(token, "gpio", strlen("gpio")) != 0) {
+		return false;
+	}
+
+	return parse_u32_token(token + strlen("gpio"), group);
+}
+
+static const struct device *gpio_device_from_group(uint32_t group)
+{
+	switch (group) {
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio0))
+	case 0U:
+		return g_gpio0_dev;
+#endif
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio1))
+	case 1U:
+		return g_gpio1_dev;
+#endif
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio2))
+	case 2U:
+		return g_gpio2_dev;
+#endif
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio3))
+	case 3U:
+		return g_gpio3_dev;
+#endif
+	default:
+		return NULL;
+	}
+}
+
+static int tokenize_text_command(char *buf, char *argv[], size_t argv_len)
+{
+	size_t argc = 0U;
+	char *cursor = buf;
+
+	if (buf == NULL || argv == NULL || argv_len == 0U) {
+		return -EINVAL;
+	}
+
+	while (*cursor != '\0') {
+		while (isspace((unsigned char)*cursor)) {
+			*cursor++ = '\0';
+		}
+
+		if (*cursor == '\0') {
+			break;
+		}
+
+		if (argc >= argv_len) {
+			return -EINVAL;
+		}
+
+		argv[argc++] = cursor;
+		while (*cursor != '\0' && !isspace((unsigned char)*cursor)) {
+			cursor++;
+		}
+	}
+
+	return (int)argc;
+}
+
+static void uart_send_fixed6_from_micro(int64_t micro_value)
+{
+	uint64_t magnitude;
+	uint32_t frac_digits[6];
+
+	if (micro_value < 0) {
+		uart_poll_out(g_ctx.uart, '-');
+		magnitude = (uint64_t)(-micro_value);
+	} else {
+		magnitude = (uint64_t)micro_value;
+	}
+
+	uart_send_u32((uint32_t)(magnitude / 1000000ULL));
+	uart_poll_out(g_ctx.uart, '.');
+	magnitude %= 1000000ULL;
+
+	for (int i = 5; i >= 0; --i) {
+		frac_digits[i] = (uint32_t)(magnitude % 10ULL);
+		magnitude /= 10ULL;
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(frac_digits); ++i) {
+		uart_poll_out(g_ctx.uart, (uint8_t)('0' + frac_digits[i]));
+	}
 }
 
 static int at_adc_ensure_ready(void)
@@ -872,36 +1002,62 @@ static int at_handle_chgcur(void)
 	return 0;
 }
 
-static int at_handle_batv(void)
+static int at_measure_batv(int32_t *bat_mv, int32_t *raw_value, bool *from_pmic)
 {
 	struct sensor_value bat_voltage;
-	int32_t bat_mv;
 	int16_t bat_raw;
 	int rc;
+
+	if (bat_mv == NULL || raw_value == NULL || from_pmic == NULL) {
+		return -EINVAL;
+	}
 
 	rc = at_pmic_charger_fetch(NULL, &bat_voltage, NULL);
 	if (rc == 0) {
 		int64_t bat_uv = sensor_value_to_micro(&bat_voltage);
 
-		bat_mv = (int32_t)(bat_uv / 1000);
-		uart_send_str("+TESTDATA:STATE2,ITEM=BATV,VALUE=");
-		uart_send_s32(bat_mv);
-		uart_send_str(",UNIT=mV,RAW=");
-		uart_send_s32((int32_t)bat_uv);
-		uart_send_str(",META=src:pmic_charger;ref_delta_mv:");
-		uart_send_u32(CONFIG_FACTORY_BATV_DELTA_MAX_MV);
-		uart_send_line(";sensor:gauge_voltage");
+		*bat_mv = (int32_t)(bat_uv / 1000);
+		*raw_value = (int32_t)bat_uv;
+		*from_pmic = true;
 		return 0;
 	}
 
-	rc = at_adc_sample_mv((uint8_t)CONFIG_FACTORY_ADC_BATV_CHANNEL, &bat_mv, &bat_raw);
+	rc = at_adc_sample_mv((uint8_t)CONFIG_FACTORY_ADC_BATV_CHANNEL, bat_mv, &bat_raw);
+	if (rc != 0) {
+		return rc;
+	}
+
+	*raw_value = (int32_t)bat_raw;
+	*from_pmic = false;
+	return 0;
+}
+
+static int at_handle_batv(void)
+{
+	int32_t bat_mv;
+	int32_t raw_value;
+	bool from_pmic;
+	int rc;
+
+	rc = at_measure_batv(&bat_mv, &raw_value, &from_pmic);
 	if (rc != 0) {
 		emit_testdata("STATE2", "BATV", "0", "mV", "batv_read_failed",
 			      "err:HW_NOT_READY");
 		return rc;
 	}
 
-	emit_testdata_adc("STATE2", "BATV", bat_mv, bat_raw,
+	if (from_pmic) {
+		uart_send_str("+TESTDATA:STATE2,ITEM=BATV,VALUE=");
+		uart_send_s32(bat_mv);
+		uart_send_str(",UNIT=mV,RAW=");
+		uart_send_s32(raw_value);
+		uart_send_str(",META=src:pmic_charger;ref_delta_mv:");
+		uart_send_u32(CONFIG_FACTORY_BATV_DELTA_MAX_MV);
+		uart_send_line(";sensor:gauge_voltage");
+		return 0;
+	}
+
+	emit_testdata_adc("STATE2", "BATV", bat_mv, (int16_t)raw_value,
 			  CONFIG_FACTORY_BATV_DELTA_MAX_MV,
 			  (uint8_t)CONFIG_FACTORY_ADC_BATV_CHANNEL);
 	return 0;
@@ -962,7 +1118,10 @@ static void at_ble_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 }
 #endif
 
-static int at_handle_blescan(void)
+static int at_ble_scan_collect(char *first_addr, size_t first_addr_len,
+			       int32_t *first_rssi, char *best_addr,
+			       size_t best_addr_len, uint32_t *adv_count,
+			       int32_t *best_rssi)
 {
 #if defined(CONFIG_BT)
 	struct bt_le_scan_param scan_param = {
@@ -971,47 +1130,85 @@ static int at_handle_blescan(void)
 		.interval = BT_GAP_SCAN_FAST_INTERVAL,
 		.window = BT_GAP_SCAN_FAST_WINDOW,
 	};
-	char first_addr[BT_ADDR_LE_STR_LEN] = "none";
-	char best_addr[BT_ADDR_LE_STR_LEN] = "none";
 	int rc;
 	int stop_rc;
-	int32_t best_rssi = -127;
+
+	if (first_addr == NULL || best_addr == NULL || first_rssi == NULL ||
+	    adv_count == NULL || best_rssi == NULL) {
+		return -EINVAL;
+	}
 
 	rc = at_ble_ensure_ready();
 	if (rc != 0) {
-		emit_testdata("STATE3", "BLESCAN", "0", "adv", "bt_init_failed",
-			      "err:HW_NOT_READY");
 		return rc;
 	}
 
 	memset(&g_ble_scan_stats, 0, sizeof(g_ble_scan_stats));
+	strcpy(first_addr, "none");
+	strcpy(best_addr, "none");
+	*first_rssi = -127;
+	*best_rssi = -127;
+	*adv_count = 0U;
+
 	rc = bt_le_scan_start(&scan_param, at_ble_scan_cb);
 	if (rc != 0 && rc != -EALREADY) {
-		emit_testdata("STATE3", "BLESCAN", "0", "adv", "scan_start_failed",
-			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
 	k_msleep(CONFIG_FACTORY_BLE_SCAN_WINDOW_MS);
 	stop_rc = bt_le_scan_stop();
 	if (stop_rc != 0 && stop_rc != -EALREADY) {
-		emit_testdata("STATE3", "BLESCAN", "0", "adv", "scan_stop_failed",
-			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
 	if (g_ble_scan_stats.have_first) {
 		bt_addr_le_to_str(&g_ble_scan_stats.first_addr, first_addr,
-				  sizeof(first_addr));
-	}
-	if (g_ble_scan_stats.have_best) {
-		best_rssi = g_ble_scan_stats.best_rssi;
-		bt_addr_le_to_str(&g_ble_scan_stats.best_addr, best_addr,
-				  sizeof(best_addr));
+				  first_addr_len);
+		*first_rssi = g_ble_scan_stats.first_rssi;
 	}
 
+	if (g_ble_scan_stats.have_best) {
+		bt_addr_le_to_str(&g_ble_scan_stats.best_addr, best_addr,
+				  best_addr_len);
+		*best_rssi = g_ble_scan_stats.best_rssi;
+	}
+
+	*adv_count = g_ble_scan_stats.adv_count;
+	return 0;
+#else
+	ARG_UNUSED(first_addr);
+	ARG_UNUSED(first_addr_len);
+	ARG_UNUSED(first_rssi);
+	ARG_UNUSED(best_addr);
+	ARG_UNUSED(best_addr_len);
+	ARG_UNUSED(adv_count);
+	ARG_UNUSED(best_rssi);
+	return -ENODEV;
+#endif
+}
+
+static int at_handle_blescan(void)
+{
+#if defined(CONFIG_BT)
+	char first_addr[BT_ADDR_LE_STR_LEN] = "none";
+	char best_addr[BT_ADDR_LE_STR_LEN] = "none";
+	int32_t first_rssi;
+	int32_t best_rssi = -127;
+	uint32_t adv_count = 0U;
+	int rc;
+
+	rc = at_ble_scan_collect(first_addr, sizeof(first_addr), &first_rssi,
+				 best_addr, sizeof(best_addr), &adv_count,
+				 &best_rssi);
+	if (rc != 0) {
+		emit_testdata("STATE3", "BLESCAN", "0", "adv", "scan_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+	ARG_UNUSED(first_rssi);
+
 	uart_send_str("+TESTDATA:STATE3,ITEM=BLESCAN,VALUE=");
-	uart_send_u32(g_ble_scan_stats.adv_count);
+	uart_send_u32(adv_count);
 	uart_send_str(",UNIT=adv,RAW=");
 	uart_send_s32(best_rssi);
 	uart_send_str(",META=first:");
@@ -1118,7 +1315,8 @@ static int at_handle_imu6d(void)
 #endif
 }
 
-static int at_handle_micamp(void)
+static int at_capture_mic_stats(uint32_t sample_seconds,
+				struct mic_capture_stats *stats)
 {
 #if DT_NODE_EXISTS(DT_ALIAS(dmic20))
 	struct pcm_stream_cfg stream_cfg = {
@@ -1142,23 +1340,31 @@ static int at_handle_micamp(void)
 	};
 	void *buffer = NULL;
 	void *discard_buffer = NULL;
-	uint32_t size = 0;
-	uint32_t samples;
+	uint32_t size = 0U;
+	uint32_t current_run = 0U;
+	uint32_t total_samples = 0U;
 	int64_t sum_abs = 0;
-	int32_t peak = 0;
-	int32_t avg;
+	int32_t peak_abs = 0;
+	int32_t min_sample = INT32_MAX;
+	int32_t max_sample = INT32_MIN;
+	int16_t prev_sample = 0;
+	int64_t deadline_ms = 0;
+	bool have_prev = false;
+	bool captured_any = false;
 	int rc;
+
+	if (stats == NULL) {
+		return -EINVAL;
+	}
+
+	memset(stats, 0, sizeof(*stats));
 
 	rc = at_enable_dmic_power();
 	if (rc != 0) {
-		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_power_failed",
-			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
 	if (!device_is_ready(g_dmic_dev)) {
-		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_not_ready",
-			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
@@ -1167,19 +1373,14 @@ static int at_handle_micamp(void)
 
 	rc = dmic_configure(g_dmic_dev, &dmic_cfg);
 	if (rc != 0) {
-		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_config_failed",
-			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
 	rc = dmic_trigger(g_dmic_dev, DMIC_TRIGGER_START);
 	if (rc != 0) {
-		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_start_failed",
-			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
-	/* Discard the first block to let the DMIC pipeline settle, matching the working sample. */
 	rc = dmic_read(g_dmic_dev, 0, &discard_buffer, &size,
 		       CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS);
 	if (rc == 0 && discard_buffer != NULL) {
@@ -1187,42 +1388,95 @@ static int at_handle_micamp(void)
 		discard_buffer = NULL;
 	}
 
-	rc = dmic_read(g_dmic_dev, 0, &buffer, &size, CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS);
+	if (sample_seconds > 0U) {
+		deadline_ms = k_uptime_get() + ((int64_t)sample_seconds * 1000LL);
+	}
+
+	do {
+		rc = dmic_read(g_dmic_dev, 0, &buffer, &size,
+			       CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS);
+		if (rc != 0 || buffer == NULL || size < sizeof(int16_t)) {
+			(void)dmic_trigger(g_dmic_dev, DMIC_TRIGGER_STOP);
+			return -ENODEV;
+		}
+
+		captured_any = true;
+
+		for (uint32_t i = 0; i < (size / sizeof(int16_t)); ++i) {
+			int32_t sample = ((int16_t *)buffer)[i];
+			int32_t abs_sample = (sample < 0) ? -sample : sample;
+
+			if (sample < min_sample) {
+				min_sample = sample;
+			}
+			if (sample > max_sample) {
+				max_sample = sample;
+			}
+			if (abs_sample > peak_abs) {
+				peak_abs = abs_sample;
+			}
+
+			if (have_prev && sample == prev_sample) {
+				current_run++;
+			} else {
+				current_run = 1U;
+				prev_sample = (int16_t)sample;
+				have_prev = true;
+			}
+
+			if (current_run > stats->max_consecutive) {
+				stats->max_consecutive = current_run;
+			}
+
+			sum_abs += abs_sample;
+			total_samples++;
+		}
+
+		(void)k_mem_slab_free(&g_dmic_mem_slab, buffer);
+		buffer = NULL;
+	} while (sample_seconds > 0U && k_uptime_get() < deadline_ms);
+
 	(void)dmic_trigger(g_dmic_dev, DMIC_TRIGGER_STOP);
-	if (rc != 0 || buffer == NULL || size < sizeof(int16_t)) {
+
+	if (!captured_any || total_samples == 0U) {
+		return -ENODEV;
+	}
+
+	stats->sample_count = total_samples;
+	stats->peak_abs = peak_abs;
+	stats->avg_abs = (int32_t)(sum_abs / total_samples);
+	stats->min_sample = min_sample;
+	stats->max_sample = max_sample;
+	return 0;
+#else
+	ARG_UNUSED(sample_seconds);
+	ARG_UNUSED(stats);
+	return -ENODEV;
+#endif
+}
+
+static int at_handle_micamp(void)
+{
+	struct mic_capture_stats stats = { 0 };
+	int rc;
+
+	rc = at_capture_mic_stats(0U, &stats);
+	if (rc != 0) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_read_failed",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
-	samples = size / sizeof(int16_t);
-	for (uint32_t i = 0; i < samples; ++i) {
-		int32_t v = ((int16_t *)buffer)[i];
-		int32_t abs_v = (v < 0) ? -v : v;
-
-		if (abs_v > peak) {
-			peak = abs_v;
-		}
-		sum_abs += abs_v;
-	}
-	avg = (samples > 0) ? (int32_t)(sum_abs / samples) : 0;
-	(void)k_mem_slab_free(&g_dmic_mem_slab, buffer);
-
 	uart_send_str("+TESTDATA:STATE4,ITEM=MICAMP,VALUE=");
-	uart_send_s32(peak);
+	uart_send_s32(stats.peak_abs);
 	uart_send_str(",UNIT=abs16,RAW=");
-	uart_send_s32(avg);
+	uart_send_s32(stats.avg_abs);
 	uart_send_str(",META=samples:");
-	uart_send_u32(samples);
+	uart_send_u32(stats.sample_count);
 	uart_send_str(";rate:");
 	uart_send_u32(CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ);
 	uart_send_line(";mode:single_block;discard:first_block");
 	return 0;
-#else
-	emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_alias_missing",
-		      "err:HW_NOT_READY");
-	return -ENODEV;
-#endif
 }
 
 static int at_handle_sleepi(void)
@@ -1365,27 +1619,31 @@ static int at_handle_flashwrite(void)
 	return 0;
 }
 
-static int at_handle_shipmode_a(void)
+static int at_enter_ship_mode_common(const char *state, const char *phase)
 {
 	int rc;
 
 	if (g_ctx.regulator_parent == NULL ||
 	    !device_is_ready(g_ctx.regulator_parent)) {
-		emit_testdata("STATE8A", "SHIPMODE", "0", "bool",
+		emit_testdata(state, "SHIPMODE", "0", "bool",
 			      "regulator_not_ready", "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
 	rc = regulator_parent_ship_mode(g_ctx.regulator_parent);
 	if (rc != 0) {
-		emit_testdata("STATE8A", "SHIPMODE", "0", "bool", "ship_mode_failed",
+		emit_testdata(state, "SHIPMODE", "0", "bool", "ship_mode_failed",
 			      "err:HW_NOT_READY");
 		return -ENODEV;
 	}
 
-	emit_testdata("STATE8A", "SHIPMODE", "1", "bool", "ship_mode_entered",
-		      "phase:A");
+	emit_testdata(state, "SHIPMODE", "1", "bool", "ship_mode_entered", phase);
 	return 0;
+}
+
+static int at_handle_shipmode_a(void)
+{
+	return at_enter_ship_mode_common("STATE8A", "phase:A");
 }
 
 static int at_handle_vbus_b(void)
@@ -1428,25 +1686,7 @@ static int at_handle_v3p3_b(void)
 
 static int at_handle_shipmode_b(void)
 {
-	int rc;
-
-	if (g_ctx.regulator_parent == NULL ||
-	    !device_is_ready(g_ctx.regulator_parent)) {
-		emit_testdata("STATE9B", "SHIPMODE", "0", "bool",
-			      "regulator_not_ready", "err:HW_NOT_READY");
-		return -ENODEV;
-	}
-
-	rc = regulator_parent_ship_mode(g_ctx.regulator_parent);
-	if (rc != 0) {
-		emit_testdata("STATE9B", "SHIPMODE", "0", "bool", "ship_mode_failed",
-			      "err:HW_NOT_READY");
-		return -ENODEV;
-	}
-
-	emit_testdata("STATE9B", "SHIPMODE", "1", "bool", "ship_mode_entered",
-		      "phase:B");
-	return 0;
+	return at_enter_ship_mode_common("STATE9B", "phase:B");
 }
 
 struct state_item {
@@ -1594,6 +1834,8 @@ static const struct at_cmd g_state_cmds[] = {
 
 static int at_handle_help(void)
 {
+	uart_send_line("+CMDS:text:help,gpio set/get,bt init,bt scan on/off,sleep mode,ship mode");
+	uart_send_line("+CMDS:text:mic capture <sec>,imu get/off,flash <0-255>,bat get");
 	uart_send_line("+CMDS:AT,AT+HELP,AT+FLASH?,AT+FLASH=<0|1|2>,AT+THRESH?");
 	uart_send_line("+CMDS:AT+STATE1..AT+STATE7,AT+STATE8A,AT+STATE8B,AT+STATE9B");
 	uart_send_line("+CMDS:AT+VBUS,AT+V3P3,AT+UARTLOOP,AT+CHGCUR,AT+BATV");
@@ -1705,6 +1947,369 @@ static int dispatch_from_table(const char *trimmed, size_t trimmed_len,
 	return -ENOENT;
 }
 
+static int text_handle_gpio_set(const char *gpio_token, const char *pin_token,
+				const char *value_token)
+{
+	const struct device *gpio_dev;
+	uint32_t group;
+	uint32_t pin;
+	uint32_t value;
+	int rc;
+
+	if (!parse_gpio_group_token(gpio_token, &group) ||
+	    !parse_u32_token(pin_token, &pin) ||
+	    !parse_u32_token(value_token, &value) || value > 1U) {
+		return -EINVAL;
+	}
+
+	gpio_dev = gpio_device_from_group(group);
+	if (gpio_dev == NULL || !device_is_ready(gpio_dev)) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_configure(gpio_dev, (gpio_pin_t)pin,
+			       value != 0U ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	uart_send_str("gpio set ");
+	uart_send_str(gpio_token);
+	uart_send_str(" ");
+	uart_send_str(pin_token);
+	uart_send_str(" ");
+	uart_send_line(value_token);
+	return 0;
+}
+
+static int text_handle_gpio_get(const char *gpio_token, const char *pin_token)
+{
+	const struct device *gpio_dev;
+	uint32_t group;
+	uint32_t pin;
+	int value;
+	int rc;
+
+	if (!parse_gpio_group_token(gpio_token, &group) ||
+	    !parse_u32_token(pin_token, &pin)) {
+		return -EINVAL;
+	}
+
+	gpio_dev = gpio_device_from_group(group);
+	if (gpio_dev == NULL || !device_is_ready(gpio_dev)) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_configure(gpio_dev, (gpio_pin_t)pin, GPIO_INPUT);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	value = gpio_pin_get(gpio_dev, (gpio_pin_t)pin);
+	if (value < 0) {
+		return -ENODEV;
+	}
+
+	uart_send_str("Value:");
+	uart_send_u32((uint32_t)value);
+	uart_send_str("\r\n");
+	return 0;
+}
+
+static int text_handle_bt_init(void)
+{
+	int rc = at_ble_ensure_ready();
+
+	if (rc != 0) {
+		return rc;
+	}
+
+	uart_send_line("LMP: version 6.0");
+	return 0;
+}
+
+static int text_handle_bt_scan_on(void)
+{
+	char first_addr[BT_ADDR_LE_STR_LEN] = "none";
+	char best_addr[BT_ADDR_LE_STR_LEN] = "none";
+	int32_t first_rssi = -127;
+	int32_t best_rssi = -127;
+	uint32_t adv_count = 0U;
+	int rc;
+
+	rc = at_ble_scan_collect(first_addr, sizeof(first_addr), &first_rssi,
+				 best_addr, sizeof(best_addr), &adv_count,
+				 &best_rssi);
+	if (rc != 0) {
+		return rc;
+	}
+
+	if (adv_count > 0U) {
+		uart_send_str("[DEVICE] ");
+		uart_send_str(first_addr);
+		uart_send_str(" RSSI ");
+		uart_send_s32(first_rssi);
+		uart_send_str("\r\n");
+
+		if (strcmp(best_addr, first_addr) != 0) {
+			uart_send_str("[DEVICE] ");
+			uart_send_str(best_addr);
+			uart_send_str(" RSSI ");
+			uart_send_s32(best_rssi);
+			uart_send_str("\r\n");
+		}
+	}
+
+	return 0;
+}
+
+static int text_handle_bt_scan_off(void)
+{
+#if defined(CONFIG_BT)
+	int rc = 0;
+
+	if (g_ble_initialized) {
+		rc = bt_le_scan_stop();
+		if (rc != 0 && rc != -EALREADY) {
+			return -ENODEV;
+		}
+	}
+
+	uart_send_line("bt scan off");
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int text_handle_sleep_mode(void)
+{
+	int rc = at_handle_sleepi();
+
+	if (rc == 0) {
+		uart_send_line("sleep mode");
+	}
+
+	return rc;
+}
+
+static int text_handle_ship_mode(void)
+{
+	int rc = at_enter_ship_mode_common("TEXT", "phase:text");
+
+	if (rc == 0) {
+		uart_send_line("ship mode");
+	}
+
+	return rc;
+}
+
+static int text_handle_mic_capture(const char *seconds_token)
+{
+	struct mic_capture_stats stats = { 0 };
+	uint32_t seconds = 0U;
+	int rc;
+
+	if (!parse_u32_token(seconds_token, &seconds)) {
+		return -EINVAL;
+	}
+
+	rc = at_capture_mic_stats(seconds, &stats);
+	if (rc != 0) {
+		return rc;
+	}
+
+	uart_send_str("audio data Max:");
+	uart_send_s32(stats.max_sample);
+	uart_send_str(" Min:");
+	uart_send_s32(stats.min_sample);
+	uart_send_str(" Max consecutive:");
+	uart_send_u32(stats.max_consecutive);
+	uart_send_str("\r\n");
+	return 0;
+}
+
+static int text_handle_imu_get(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	struct sensor_value accel_x, accel_y, accel_z;
+	struct sensor_value gyro_x, gyro_y, gyro_z;
+	int rc;
+
+	rc = at_ensure_imu_ready();
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	rc = at_fetch_imu_sample(&accel_x, &accel_y, &accel_z,
+				 &gyro_x, &gyro_y, &gyro_z);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	uart_send_str("accel data:");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_x));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_y));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_z));
+	uart_send_str("\r\n");
+
+	uart_send_str("gyro data:");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_x));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_y));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_z));
+	uart_send_str("\r\n");
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static int text_handle_imu_off(void)
+{
+	uart_send_line("imu off");
+	return 0;
+}
+
+static int text_handle_flash_write(const char *value_token)
+{
+	struct factory_persist verify;
+	uint32_t flash_value;
+	uint32_t old_value;
+	int rc;
+
+	if (!parse_u32_token(value_token, &flash_value) || flash_value > 255U) {
+		return -EINVAL;
+	}
+
+	if (g_ctx.persist == NULL) {
+		return -EACCES;
+	}
+
+	old_value = g_ctx.persist->legacy_flash_value;
+	g_ctx.persist->legacy_flash_value = flash_value;
+
+	rc = factory_storage_save(g_ctx.persist);
+	if (rc != 0) {
+		g_ctx.persist->legacy_flash_value = old_value;
+		return -EIO;
+	}
+
+	rc = factory_storage_load(&verify);
+	if (rc != 0 || verify.legacy_flash_value != flash_value) {
+		g_ctx.persist->legacy_flash_value = old_value;
+		return -EIO;
+	}
+
+	uart_send_str("flash ");
+	uart_send_u32(flash_value);
+	uart_send_line(" OK");
+	return 0;
+}
+
+static int text_handle_bat_get(void)
+{
+	int32_t bat_mv;
+	int32_t raw_value;
+	bool from_pmic;
+	int rc;
+
+	rc = at_measure_batv(&bat_mv, &raw_value, &from_pmic);
+	if (rc != 0) {
+		return rc;
+	}
+	ARG_UNUSED(raw_value);
+	ARG_UNUSED(from_pmic);
+
+	uart_send_str("bat:");
+	uart_send_s32(bat_mv);
+	uart_send_line("mv");
+	return 0;
+}
+
+static int dispatch_text_command(char *cmd_buf)
+{
+	char *argv[FACTORY_TEXT_CMD_MAX_TOKENS] = { 0 };
+	int argc = tokenize_text_command(cmd_buf, argv, ARRAY_SIZE(argv));
+
+	if (argc <= 0) {
+		return -ENOENT;
+	}
+
+	if (argc == 1 && strcmp(argv[0], "help") == 0) {
+		return at_handle_help();
+	}
+
+	if (argc == 5 && strcmp(argv[0], "gpio") == 0 &&
+	    strcmp(argv[1], "set") == 0) {
+		return text_handle_gpio_set(argv[2], argv[3], argv[4]);
+	}
+
+	if (argc == 4 && strcmp(argv[0], "gpio") == 0 &&
+	    strcmp(argv[1], "get") == 0) {
+		return text_handle_gpio_get(argv[2], argv[3]);
+	}
+
+	if (argc == 2 && strcmp(argv[0], "bt") == 0 &&
+	    strcmp(argv[1], "init") == 0) {
+		return text_handle_bt_init();
+	}
+
+	if (argc == 3 && strcmp(argv[0], "bt") == 0 &&
+	    strcmp(argv[1], "scan") == 0 && strcmp(argv[2], "on") == 0) {
+		return text_handle_bt_scan_on();
+	}
+
+	if (argc == 3 && strcmp(argv[0], "bt") == 0 &&
+	    strcmp(argv[1], "scan") == 0 && strcmp(argv[2], "off") == 0) {
+		return text_handle_bt_scan_off();
+	}
+
+	if (argc == 2 && strcmp(argv[0], "sleep") == 0 &&
+	    strcmp(argv[1], "mode") == 0) {
+		return text_handle_sleep_mode();
+	}
+
+	if (argc == 2 && strcmp(argv[0], "sys") == 0 &&
+	    strcmp(argv[1], "off") == 0) {
+		return text_handle_sleep_mode();
+	}
+
+	if (argc == 2 && strcmp(argv[0], "ship") == 0 &&
+	    strcmp(argv[1], "mode") == 0) {
+		return text_handle_ship_mode();
+	}
+
+	if (argc == 3 && strcmp(argv[0], "mic") == 0 &&
+	    strcmp(argv[1], "capture") == 0) {
+		return text_handle_mic_capture(argv[2]);
+	}
+
+	if (argc == 2 && strcmp(argv[0], "imu") == 0 &&
+	    strcmp(argv[1], "get") == 0) {
+		return text_handle_imu_get();
+	}
+
+	if (argc == 2 && strcmp(argv[0], "imu") == 0 &&
+	    strcmp(argv[1], "off") == 0) {
+		return text_handle_imu_off();
+	}
+
+	if (argc == 2 && strcmp(argv[0], "flash") == 0) {
+		return text_handle_flash_write(argv[1]);
+	}
+
+	if (argc == 2 && strcmp(argv[0], "bat") == 0 &&
+	    strcmp(argv[1], "get") == 0) {
+		return text_handle_bat_get();
+	}
+
+	return -ENOENT;
+}
+
 void at_handler_init(const struct device *uart_dev,
 		     const struct device *regulator_parent,
 		     struct factory_persist *persist)
@@ -1747,6 +2352,7 @@ void at_handler_process_line(const char *line, size_t len)
 {
 	const char *trimmed = line;
 	size_t trimmed_len = len;
+	char text_cmd_buf[FACTORY_CMD_PARSE_BUF_SIZE];
 	int rc;
 
 	if (line == NULL || len == 0) {
@@ -1808,6 +2414,16 @@ void at_handler_process_line(const char *line, size_t len)
 	if (rc != -ENOENT) {
 		emit_final_status(rc);
 		return;
+	}
+
+	if (trimmed_len < sizeof(text_cmd_buf)) {
+		memcpy(text_cmd_buf, trimmed, trimmed_len);
+		text_cmd_buf[trimmed_len] = '\0';
+		rc = dispatch_text_command(text_cmd_buf);
+		if (rc != -ENOENT) {
+			emit_final_status(rc);
+			return;
+		}
 	}
 
 	emit_final_status(-ENOENT);

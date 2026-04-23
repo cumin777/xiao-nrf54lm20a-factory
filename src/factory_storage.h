@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define FACTORY_STORAGE_MAGIC 0xFA51B007u
-#define FACTORY_STORAGE_VERSION 1u
+#define FACTORY_STORAGE_VERSION 2u
 #define FACTORY_BOOT_FLAG_ENTER_FACTORY 2u
 
 #define FACTORY_PERSIST_FLAGS_IDX 0u
@@ -22,6 +22,7 @@ struct factory_persist {
 	uint32_t state_bitmap;
 	uint32_t item_bitmap;
 	uint32_t reserved[3];
+	uint32_t legacy_flash_value;
 };
 
 void factory_storage_defaults(struct factory_persist *data);

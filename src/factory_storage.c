@@ -8,10 +8,35 @@
 
 #define FACTORY_STORAGE_AREA_ID FIXED_PARTITION_ID(storage_partition)
 
+struct factory_persist_v1 {
+	uint32_t magic;
+	uint32_t version;
+	uint32_t boot_flag;
+	uint32_t state_bitmap;
+	uint32_t item_bitmap;
+	uint32_t reserved[3];
+};
+
 static bool factory_storage_is_valid(const struct factory_persist *data)
 {
 	return data->magic == FACTORY_STORAGE_MAGIC &&
 	       data->version == FACTORY_STORAGE_VERSION;
+}
+
+static bool factory_storage_is_valid_v1(const struct factory_persist_v1 *data)
+{
+	return data->magic == FACTORY_STORAGE_MAGIC && data->version == 1u;
+}
+
+static void factory_storage_migrate_v1(const struct factory_persist_v1 *old_data,
+				       struct factory_persist *out)
+{
+	factory_storage_defaults(out);
+	out->boot_flag = old_data->boot_flag;
+	out->state_bitmap = old_data->state_bitmap;
+	out->item_bitmap = old_data->item_bitmap;
+	memcpy(out->reserved, old_data->reserved, sizeof(old_data->reserved));
+	out->legacy_flash_value = 0u;
 }
 
 void factory_storage_defaults(struct factory_persist *data)
@@ -48,6 +73,14 @@ int factory_storage_load(struct factory_persist *out)
 	}
 
 	if (!factory_storage_is_valid(&tmp)) {
+		const struct factory_persist_v1 *old_data =
+			(const struct factory_persist_v1 *)&tmp;
+
+		if (factory_storage_is_valid_v1(old_data)) {
+			factory_storage_migrate_v1(old_data, out);
+			return 0;
+		}
+
 		factory_storage_defaults(out);
 		return -ENODATA;
 	}

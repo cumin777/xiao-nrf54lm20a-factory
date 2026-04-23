@@ -1,7 +1,10 @@
-# XIAO nRF54LM20A Factory AT 使用文档
+# XIAO nRF54LM20A Factory UART 命令使用文档
 
 ## 1. 概述
-本固件是基于 `UART21` 的 AT 从机。
+本固件基于 `UART21`，当前同时支持：
+
+- 治具正式文本命令协议
+- 兼容保留的 `AT+...` 调试接口
 
 - 统一交互口：`UART21`
 - 角色：被动执行（不在固件内强制流程顺序）
@@ -31,9 +34,127 @@
 - `UNKNOWN_COMMAND`
 - `EXECUTION_FAILED`
 
-## 3. 基础系统指令
+## 3. 治具文本命令（V3 正式协议）
 
-### 3.1 `AT`
+### 3.1 `help`
+- 功能：输出文本命令和兼容 AT 命令清单
+- 期望反馈：多行 `+CMDS:`，最后 `OK`
+
+### 3.2 `gpio set gpio<x> <n> <0|1>`
+- 功能：配置指定 GPIO 为输出并设置电平
+- 期望反馈示例：
+
+```text
+gpio set gpio1 4 1
+OK
+```
+
+### 3.3 `gpio get gpio<x> <n>`
+- 功能：读取指定 GPIO 当前电平
+- 期望反馈示例：
+
+```text
+Value:1
+OK
+```
+
+### 3.4 `bt init`
+- 功能：初始化蓝牙协议栈
+- 期望反馈示例：
+
+```text
+LMP: version 6.0
+OK
+```
+
+### 3.5 `bt scan on`
+- 功能：执行一个扫描窗口并输出扫描结果
+- 期望反馈示例：
+
+```text
+[DEVICE] AA:BB:CC:DD:EE:FF (random) RSSI -42
+OK
+```
+
+### 3.6 `bt scan off`
+- 功能：停止扫描（幂等）
+- 期望反馈示例：
+
+```text
+bt scan off
+OK
+```
+
+### 3.7 `sleep mode`
+- 功能：复用现有 `SLEEPI` 深睡流程，`OK` 后进入 system off
+- 期望反馈示例：
+
+```text
++TESTDATA:STATE5,ITEM=SLEEPI,...
+sleep mode
+OK
+```
+
+### 3.8 `ship mode`
+- 功能：进入船运模式
+- 期望反馈示例：
+
+```text
++TESTDATA:TEXT,ITEM=SHIPMODE,...
+ship mode
+OK
+```
+
+### 3.9 `mic capture <sec>`
+- 功能：采集 DMIC 数据并输出统计值
+- 说明：`0` 表示执行一次默认采样窗口；`>0` 表示持续采样对应秒数
+- 期望反馈示例：
+
+```text
+audio data Max:532 Min:-487 Max consecutive:2
+OK
+```
+
+### 3.10 `imu get`
+- 功能：读取单次六轴样本
+- 期望反馈示例：
+
+```text
+accel data:0.012345,-0.023456,9.801234
+gyro data:0.001111,-0.002222,0.003333
+OK
+```
+
+### 3.11 `imu off`
+- 功能：兼容治具停止采样命令
+- 期望反馈示例：
+
+```text
+imu off
+OK
+```
+
+### 3.12 `flash <0-255>`
+- 功能：将单字节值安全写入 `storage` 分区并回读校验
+- 期望反馈示例：
+
+```text
+flash 7 OK
+OK
+```
+
+### 3.13 `bat get`
+- 功能：读取电池电压，优先走 `nPM1300` gauge，失败时回退 ADC
+- 期望反馈示例：
+
+```text
+bat:4012mv
+OK
+```
+
+## 4. 基础系统 AT 指令（兼容接口）
+
+### 4.1 `AT`
 - 功能：连通性测试
 - 期望反馈：
 
@@ -41,11 +162,11 @@
 OK
 ```
 
-### 3.2 `AT+HELP`
+### 4.2 `AT+HELP`
 - 功能：输出可用命令清单
 - 期望反馈：多行 `+CMDS:`，最后 `OK`
 
-### 3.3 `AT+FLASH?`
+### 4.3 `AT+FLASH?`
 - 功能：读取工厂启动标志位（`boot_flag`）
 - 期望反馈示例：
 
@@ -54,7 +175,7 @@ OK
 OK
 ```
 
-### 3.4 `AT+FLASH=<0|1|2>`
+### 4.4 `AT+FLASH=<0|1|2>`
 - 功能：设置工厂启动标志位
 - 参数：`0` / `1` / `2`
 - 期望反馈示例：
@@ -64,7 +185,7 @@ OK
 OK
 ```
 
-### 3.5 `AT+THRESH?`
+### 4.5 `AT+THRESH?`
 - 功能：回显当前参数化阈值/配置
 - 期望反馈：多行 `+TESTDATA:CFG,...`，最后 `OK`
 - 当前回显项包括：
@@ -81,7 +202,7 @@ OK
   - `BLE_SCAN_WINDOW_MS`
   - `BLE_RSSI_REF_DBM`
 
-## 4. 单项测试 AT 指令
+## 5. 单项测试 AT 指令
 
 ### 4.1 State1（供电+通信基础）
 
