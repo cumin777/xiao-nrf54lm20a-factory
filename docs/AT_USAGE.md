@@ -41,22 +41,45 @@
 - 期望反馈：多行 `+CMDS:`，最后 `OK`
 
 ### 3.2 `gpio set gpio<x> <n> <0|1>`
-- 功能：配置指定 GPIO 为输出并设置电平
+- 功能：按配对映射表把指定 GPIO 配成输出并设置电平，同时把该对中的另一脚切为输入
 - 期望反馈示例：
 
 ```text
-gpio set gpio1 4 1
+gpio set gpio1 31
 OK
 ```
 
+- 说明：
+  - `gpio set` 的回包不再回显 `value`
+  - 一次 `set` 会确定该对 GPIO 中“谁是输出侧、谁是输入侧”
+
 ### 3.3 `gpio get gpio<x> <n>`
-- 功能：读取指定 GPIO 当前电平
+- 功能：读取该映射对中当前被配置为输入模式的那一脚的电平
 - 期望反馈示例：
 
 ```text
 Value:1
 OK
 ```
+
+- 前置条件：
+  - 该 GPIO 所属配对必须先执行过一次 `gpio set`
+  - 若尚未执行 `gpio set`，会返回 `ERROR:PRECONDITION_NOT_MET`
+
+### 3.3.1 GPIO 配对映射表
+- `gpio1 31 <-> gpio1 3`
+- `gpio1 30 <-> gpio1 7`
+- `gpio0 0 <-> gpio0 3`
+- `gpio0 1 <-> gpio0 4`
+- `gpio0 2 <-> gpio0 5`
+- `gpio1 6 <-> gpio3 10`
+- `gpio1 5 <-> gpio3 9`
+- `gpio1 4 <-> gpio3 11`
+- `gpio3 0 <-> gpio3 7`
+- `gpio3 1 <-> gpio3 6`
+- `gpio3 2 <-> gpio3 5`
+- `gpio3 3 <-> gpio1 1`
+- `gpio3 4 <-> gpio1 2`
 
 ### 3.4 `bt init`
 - 功能：初始化蓝牙协议栈

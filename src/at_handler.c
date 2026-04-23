@@ -106,6 +106,20 @@ struct mic_capture_stats {
 	uint32_t sample_count;
 };
 
+struct gpio_text_endpoint {
+	uint8_t group;
+	gpio_pin_t pin;
+};
+
+struct gpio_text_pair_desc {
+	struct gpio_text_endpoint endpoints[2];
+};
+
+struct gpio_text_pair_state {
+	bool configured;
+	uint8_t output_idx;
+};
+
 static struct at_ctx g_ctx;
 
 static const struct adc_dt_spec g_adc_channels[] = {
@@ -125,6 +139,24 @@ static const gpio_pin_t g_gpio_loop_out_pins[] = { 0, 1, 2 };
 static const gpio_pin_t g_gpio_loop_in_pins[] = { 7, 6, 5 };
 static const gpio_pin_t g_nfc_loop_out_pins[] = { 3, 4 };
 static const gpio_pin_t g_nfc_loop_in_pins[] = { 1, 2 };
+
+static const struct gpio_text_pair_desc g_gpio_text_pairs[] = {
+	{ { { 1, 31 }, { 1, 3 } } },
+	{ { { 1, 30 }, { 1, 7 } } },
+	{ { { 0, 0 }, { 0, 3 } } },
+	{ { { 0, 1 }, { 0, 4 } } },
+	{ { { 0, 2 }, { 0, 5 } } },
+	{ { { 1, 6 }, { 3, 10 } } },
+	{ { { 1, 5 }, { 3, 9 } } },
+	{ { { 1, 4 }, { 3, 11 } } },
+	{ { { 3, 0 }, { 3, 7 } } },
+	{ { { 3, 1 }, { 3, 6 } } },
+	{ { { 3, 2 }, { 3, 5 } } },
+	{ { { 3, 3 }, { 1, 1 } } },
+	{ { { 3, 4 }, { 1, 2 } } },
+};
+
+static struct gpio_text_pair_state g_gpio_text_pair_state[ARRAY_SIZE(g_gpio_text_pairs)];
 
 static const struct gpio_dt_spec g_sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 static struct gpio_callback g_sw0_cb_data;
@@ -432,6 +464,74 @@ static const struct device *gpio_device_from_group(uint32_t group)
 	default:
 		return NULL;
 	}
+}
+
+static bool gpio_text_endpoint_matches(const struct gpio_text_endpoint *endpoint,
+				       uint32_t group, uint32_t pin)
+{
+	return endpoint != NULL && endpoint->group == group &&
+	       endpoint->pin == (gpio_pin_t)pin;
+}
+
+static int gpio_text_find_pair(uint32_t group, uint32_t pin, size_t *pair_idx,
+			       uint8_t *endpoint_idx)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(g_gpio_text_pairs); ++i) {
+		for (uint8_t j = 0; j < ARRAY_SIZE(g_gpio_text_pairs[i].endpoints); ++j) {
+			if (gpio_text_endpoint_matches(&g_gpio_text_pairs[i].endpoints[j],
+						       group, pin)) {
+				if (pair_idx != NULL) {
+					*pair_idx = i;
+				}
+				if (endpoint_idx != NULL) {
+					*endpoint_idx = j;
+				}
+				return 0;
+			}
+		}
+	}
+
+	return -ENOENT;
+}
+
+static int gpio_text_configure_endpoint(const struct gpio_text_endpoint *endpoint,
+					gpio_flags_t flags)
+{
+	const struct device *gpio_dev;
+
+	if (endpoint == NULL) {
+		return -EINVAL;
+	}
+
+	gpio_dev = gpio_device_from_group(endpoint->group);
+	if (gpio_dev == NULL || !device_is_ready(gpio_dev)) {
+		return -ENODEV;
+	}
+
+	return gpio_pin_configure(gpio_dev, endpoint->pin, flags);
+}
+
+static int gpio_text_read_endpoint(const struct gpio_text_endpoint *endpoint, int *value)
+{
+	const struct device *gpio_dev;
+	int rc;
+
+	if (endpoint == NULL || value == NULL) {
+		return -EINVAL;
+	}
+
+	gpio_dev = gpio_device_from_group(endpoint->group);
+	if (gpio_dev == NULL || !device_is_ready(gpio_dev)) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_get(gpio_dev, endpoint->pin);
+	if (rc < 0) {
+		return -ENODEV;
+	}
+
+	*value = rc;
+	return 0;
 }
 
 static int tokenize_text_command(char *buf, char *argv[], size_t argv_len)
@@ -2171,10 +2271,12 @@ static int dispatch_from_table(const char *trimmed, size_t trimmed_len,
 static int text_handle_gpio_set(const char *gpio_token, const char *pin_token,
 				const char *value_token)
 {
-	const struct device *gpio_dev;
 	uint32_t group;
 	uint32_t pin;
 	uint32_t value;
+	size_t pair_idx;
+	uint8_t endpoint_idx;
+	uint8_t input_idx;
 	int rc;
 
 	if (!parse_gpio_group_token(gpio_token, &group) ||
@@ -2183,31 +2285,44 @@ static int text_handle_gpio_set(const char *gpio_token, const char *pin_token,
 		return -EINVAL;
 	}
 
-	gpio_dev = gpio_device_from_group(group);
-	if (gpio_dev == NULL || !device_is_ready(gpio_dev)) {
-		return -ENODEV;
+	rc = gpio_text_find_pair(group, pin, &pair_idx, &endpoint_idx);
+	if (rc != 0) {
+		return -EINVAL;
 	}
 
-	rc = gpio_pin_configure(gpio_dev, (gpio_pin_t)pin,
-			       value != 0U ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
+	input_idx = endpoint_idx == 0U ? 1U : 0U;
+
+	rc = gpio_text_configure_endpoint(&g_gpio_text_pairs[pair_idx].endpoints[input_idx],
+					 GPIO_INPUT);
 	if (rc != 0) {
 		return -ENODEV;
 	}
+
+	rc = gpio_text_configure_endpoint(&g_gpio_text_pairs[pair_idx].endpoints[endpoint_idx],
+					 value != 0U ? GPIO_OUTPUT_ACTIVE :
+						      GPIO_OUTPUT_INACTIVE);
+	if (rc != 0) {
+		return -ENODEV;
+	}
+
+	g_gpio_text_pair_state[pair_idx].configured = true;
+	g_gpio_text_pair_state[pair_idx].output_idx = endpoint_idx;
 
 	uart_send_str("gpio set ");
 	uart_send_str(gpio_token);
 	uart_send_str(" ");
 	uart_send_str(pin_token);
-	uart_send_str(" ");
-	uart_send_line(value_token);
+	uart_send_str("\r\n");
 	return 0;
 }
 
 static int text_handle_gpio_get(const char *gpio_token, const char *pin_token)
 {
-	const struct device *gpio_dev;
 	uint32_t group;
 	uint32_t pin;
+	size_t pair_idx;
+	uint8_t endpoint_idx;
+	uint8_t input_idx;
 	int value;
 	int rc;
 
@@ -2216,19 +2331,26 @@ static int text_handle_gpio_get(const char *gpio_token, const char *pin_token)
 		return -EINVAL;
 	}
 
-	gpio_dev = gpio_device_from_group(group);
-	if (gpio_dev == NULL || !device_is_ready(gpio_dev)) {
-		return -ENODEV;
+	rc = gpio_text_find_pair(group, pin, &pair_idx, &endpoint_idx);
+	if (rc != 0) {
+		return -EINVAL;
 	}
 
-	rc = gpio_pin_configure(gpio_dev, (gpio_pin_t)pin, GPIO_INPUT);
+	if (!g_gpio_text_pair_state[pair_idx].configured) {
+		return -EACCES;
+	}
+
+	input_idx = g_gpio_text_pair_state[pair_idx].output_idx == 0U ? 1U : 0U;
+	rc = gpio_text_configure_endpoint(&g_gpio_text_pairs[pair_idx].endpoints[input_idx],
+					 GPIO_INPUT);
 	if (rc != 0) {
 		return -ENODEV;
 	}
 
-	value = gpio_pin_get(gpio_dev, (gpio_pin_t)pin);
-	if (value < 0) {
-		return -ENODEV;
+	rc = gpio_text_read_endpoint(&g_gpio_text_pairs[pair_idx].endpoints[input_idx],
+				    &value);
+	if (rc != 0) {
+		return rc;
 	}
 
 	uart_send_str("Value:");
@@ -2537,6 +2659,7 @@ void at_handler_init(const struct device *uart_dev,
 	g_sleepi_system_off_pending = false;
 	g_uart20_test_enabled = false;
 	uart20_rx_reset();
+	memset(g_gpio_text_pair_state, 0, sizeof(g_gpio_text_pair_state));
 #if defined(CONFIG_BT)
 	g_ble_text_scan_active = false;
 	at_ble_scan_reset_stats();

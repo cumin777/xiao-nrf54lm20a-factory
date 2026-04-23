@@ -6,8 +6,8 @@ cd "$repo_root"
 
 rg -n "dispatch_text_command|tokenize_text_command|FACTORY_TEXT_CMD_MAX_TOKENS" src/at_handler.c >/dev/null
 
-rg -n "\"gpio\", \"set\"|text_handle_gpio_set" src/at_handler.c >/dev/null
-rg -n "\"gpio\", \"get\"|text_handle_gpio_get" src/at_handler.c >/dev/null
+rg -n "\"gpio\", \"set\"|text_handle_gpio_set|g_gpio_text_pairs|g_gpio_text_pair_state" src/at_handler.c >/dev/null
+rg -n "\"gpio\", \"get\"|text_handle_gpio_get|gpio_text_find_pair" src/at_handler.c >/dev/null
 rg -n "text_handle_bt_init|text_handle_bt_scan_on|text_handle_bt_scan_off" src/at_handler.c >/dev/null
 rg -n "text_handle_uart20_on|uart20 on" src/at_handler.c >/dev/null
 rg -n "g_ble_text_scan_active|at_ble_scan_start_session|at_ble_scan_stop_session|emit_text_ble_scan_results" src/at_handler.c >/dev/null
