@@ -93,6 +93,7 @@
 
 struct at_ctx {
 	const struct device *uart;
+	const struct device *uart_primary;
 	const struct device *regulator_parent;
 	struct factory_persist *persist;
 };
@@ -237,10 +238,27 @@ static const struct bt_le_scan_param g_ble_scan_param = {
 };
 #endif
 
+static void uart_emit_char(uint8_t ch)
+{
+	if (g_ctx.uart != NULL && device_is_ready(g_ctx.uart)) {
+		uart_poll_out(g_ctx.uart, ch);
+	}
+
+	if (g_ctx.uart_primary != NULL && g_ctx.uart_primary != g_ctx.uart &&
+	    device_is_ready(g_ctx.uart_primary)) {
+		uart_poll_out(g_ctx.uart_primary, ch);
+	}
+
+	if (g_uart20_dev != NULL && g_uart20_dev != g_ctx.uart &&
+	    g_uart20_dev != g_ctx.uart_primary && device_is_ready(g_uart20_dev)) {
+		uart_poll_out(g_uart20_dev, ch);
+	}
+}
+
 static void uart_send_str(const char *s)
 {
 	while (*s != '\0') {
-		uart_poll_out(g_ctx.uart, (uint8_t)*s++);
+		uart_emit_char((uint8_t)*s++);
 	}
 }
 
@@ -273,7 +291,7 @@ static void uart_send_u32(uint32_t value)
 	int i = 0;
 
 	if (value == 0u) {
-		uart_poll_out(g_ctx.uart, '0');
+		uart_emit_char('0');
 		return;
 	}
 
@@ -283,14 +301,14 @@ static void uart_send_u32(uint32_t value)
 	}
 
 	while (i > 0) {
-		uart_poll_out(g_ctx.uart, (uint8_t)buf[--i]);
+		uart_emit_char((uint8_t)buf[--i]);
 	}
 }
 
 static void uart_send_s32(int32_t value)
 {
 	if (value < 0) {
-		uart_poll_out(g_ctx.uart, '-');
+		uart_emit_char('-');
 		uart_send_u32((uint32_t)(-(int64_t)value));
 		return;
 	}
@@ -314,7 +332,7 @@ static void debug_send_span(const char *label, const char *value, size_t len)
 {
 	debug_send_label(label);
 	for (size_t i = 0; i < len; ++i) {
-		uart_poll_out(g_ctx.uart, (uint8_t)value[i]);
+		uart_emit_char((uint8_t)value[i]);
 	}
 	uart_send_str("\r\n");
 }
@@ -609,14 +627,14 @@ static void uart_send_fixed6_from_micro(int64_t micro_value)
 	uint32_t frac_digits[6];
 
 	if (micro_value < 0) {
-		uart_poll_out(g_ctx.uart, '-');
+		uart_emit_char('-');
 		magnitude = (uint64_t)(-micro_value);
 	} else {
 		magnitude = (uint64_t)micro_value;
 	}
 
 	uart_send_u32((uint32_t)(magnitude / 1000000ULL));
-	uart_poll_out(g_ctx.uart, '.');
+	uart_emit_char('.');
 	magnitude %= 1000000ULL;
 
 	for (int i = 5; i >= 0; --i) {
@@ -625,7 +643,7 @@ static void uart_send_fixed6_from_micro(int64_t micro_value)
 	}
 
 	for (size_t i = 0; i < ARRAY_SIZE(frac_digits); ++i) {
-		uart_poll_out(g_ctx.uart, (uint8_t)('0' + frac_digits[i]));
+		uart_emit_char((uint8_t)('0' + frac_digits[i]));
 	}
 }
 
@@ -2722,6 +2740,7 @@ void at_handler_init(const struct device *uart_dev,
 		     struct factory_persist *persist)
 {
 	g_ctx.uart = uart_dev;
+	g_ctx.uart_primary = uart_dev;
 	g_ctx.regulator_parent = regulator_parent;
 	g_ctx.persist = persist;
 	g_adc_initialized = false;
@@ -2735,6 +2754,11 @@ void at_handler_init(const struct device *uart_dev,
 	g_ble_text_scan_active = false;
 	at_ble_scan_reset_stats();
 #endif
+}
+
+bool at_handler_uart20_service_enabled(void)
+{
+	return g_uart20_test_enabled;
 }
 
 void at_handler_poll_background(void)
@@ -2796,12 +2820,27 @@ void at_handler_run_deferred_action(void)
 	sys_poweroff();
 }
 
-void at_handler_process_line(const char *line, size_t len)
+void at_handler_process_line_from_uart(const struct device *uart_dev,
+				       const char *line, size_t len)
 {
 	const char *trimmed = line;
 	size_t trimmed_len = len;
 	char text_cmd_buf[FACTORY_CMD_PARSE_BUF_SIZE];
 	int rc;
+
+	if (uart_dev != NULL && device_is_ready(uart_dev)) {
+		g_ctx.uart = uart_dev;
+	} else {
+		g_ctx.uart = g_ctx.uart_primary;
+	}
+
+	if (g_ctx.uart == g_ctx.uart_primary) {
+		debug_send_line("PARSE:source_uart=", "uart21");
+	} else if (g_ctx.uart == g_uart20_dev) {
+		debug_send_line("PARSE:source_uart=", "uart20");
+	} else {
+		debug_send_line("PARSE:source_uart=", "other");
+	}
 
 	if (line == NULL || len == 0) {
 		debug_send_line("PARSE:skip=", "null_or_empty");

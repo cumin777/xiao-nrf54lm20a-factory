@@ -11,18 +11,23 @@
 #include "factory_storage.h"
 
 #define UART_NODE DT_NODELABEL(uart21)
+#define UART20_NODE DT_NODELABEL(uart20)
 #define LED_NODE DT_ALIAS(led0)
 #define REGULATOR_PARENT_NODE DT_ALIAS(regulator_parent)
 
 #define CMD_BUF_SIZE 160
 
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_NODE);
+static const struct device *const uart20_dev = DEVICE_DT_GET_OR_NULL(UART20_NODE);
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 static const struct device *const regulator_parent =
 	DEVICE_DT_GET_OR_NULL(REGULATOR_PARENT_NODE);
 
 static struct factory_persist g_persist;
 static bool g_led_ready;
+
+static bool uart_rx_is_printable(uint8_t ch);
+static void uart_rx_reset(char *buf, size_t *len);
 
 static void uart_send_str(const char *str)
 {
@@ -31,10 +36,29 @@ static void uart_send_str(const char *str)
 	}
 }
 
+static void uart_send_str_dev(const struct device *uart, const char *str)
+{
+	if (uart == NULL || !device_is_ready(uart)) {
+		return;
+	}
+
+	while (*str) {
+		uart_poll_out(uart, (uint8_t)*str++);
+	}
+}
+
+static void uart_send_str_all(const char *str)
+{
+	uart_send_str_dev(uart_dev, str);
+	if (uart20_dev != NULL && uart20_dev != uart_dev) {
+		uart_send_str_dev(uart20_dev, str);
+	}
+}
+
 static void uart_send_line(const char *str)
 {
-	uart_send_str(str);
-	uart_send_str("\r\n");
+	uart_send_str_all(str);
+	uart_send_str_all("\r\n");
 }
 
 static void uart_send_u32(uint32_t value)
@@ -57,18 +81,44 @@ static void uart_send_u32(uint32_t value)
 	}
 }
 
+static void uart_send_u32_all(uint32_t value)
+{
+	char buf[11];
+	int i = 0;
+
+	if (value == 0U) {
+		uart_send_str_all("0");
+		return;
+	}
+
+	while (value > 0U && i < (int)sizeof(buf)) {
+		buf[i++] = (char)('0' + (value % 10U));
+		value /= 10U;
+	}
+
+	while (i > 0) {
+		char ch[2] = { buf[--i], '\0' };
+		uart_send_str_all(ch);
+	}
+}
+
 static void uart_send_hex8(uint8_t value)
 {
 	static const char hex[] = "0123456789ABCDEF";
 
-	uart_poll_out(uart_dev, hex[(value >> 4) & 0x0F]);
-	uart_poll_out(uart_dev, hex[value & 0x0F]);
+	char out[3] = {
+		hex[(value >> 4) & 0x0F],
+		hex[value & 0x0F],
+		'\0',
+	};
+
+	uart_send_str_all(out);
 }
 
 static void debug_send_label(const char *label)
 {
-	uart_send_str("[DBG] ");
-	uart_send_str(label);
+	uart_send_str_all("[DBG] ");
+	uart_send_str_all(label);
 }
 
 static void debug_send_line(const char *label, const char *value)
@@ -80,19 +130,63 @@ static void debug_send_line(const char *label, const char *value)
 static void debug_send_u32(const char *label, uint32_t value)
 {
 	debug_send_label(label);
-	uart_send_u32(value);
-	uart_send_str("\r\n");
+	uart_send_u32_all(value);
+	uart_send_str_all("\r\n");
 }
 
-static void debug_send_rx_line(const char *buf, size_t len)
+static void debug_send_rx_line_tagged(const char *tag, const char *buf, size_t len)
 {
-	debug_send_label("RX_LINE:");
+	debug_send_label(tag);
 
 	for (size_t i = 0; i < len; ++i) {
-		uart_poll_out(uart_dev, (uint8_t)buf[i]);
+		char ch[2] = { buf[i], '\0' };
+		uart_send_str_all(ch);
 	}
 
-	uart_send_str("\r\n");
+	uart_send_str_all("\r\n");
+}
+
+static void process_uart_rx(const struct device *src_uart, const char *tag,
+			    char *buf, size_t *len, bool *handled)
+{
+	uint8_t ch;
+
+	if (src_uart == NULL || !device_is_ready(src_uart)) {
+		return;
+	}
+
+	if (uart_poll_in(src_uart, &ch) != 0) {
+		return;
+	}
+
+	*handled = true;
+
+	if (ch == '\r' || ch == '\n') {
+		if (*len > 0U) {
+			buf[*len] = '\0';
+			debug_send_rx_line_tagged(tag, buf, *len);
+			at_handler_process_line_from_uart(src_uart, buf, *len);
+			at_handler_run_deferred_action();
+			uart_rx_reset(buf, len);
+		}
+		return;
+	}
+
+	if (!uart_rx_is_printable(ch)) {
+		debug_send_label("RX_DROP_NONPRINTABLE:0x");
+		uart_send_hex8(ch);
+		uart_send_str_all("\r\n");
+		uart_rx_reset(buf, len);
+		return;
+	}
+
+	if (*len < (CMD_BUF_SIZE - 1U)) {
+		buf[(*len)++] = (char)ch;
+	} else {
+		uart_rx_reset(buf, len);
+		debug_send_u32("RX_BUFFER_OVERFLOW:len=", CMD_BUF_SIZE - 1U);
+		uart_send_line("ERROR:BUFFER_OVERFLOW");
+	}
 }
 
 static bool uart_rx_is_printable(uint8_t ch)
@@ -180,14 +274,29 @@ static void run_factory_program(void)
 
 int main(void)
 {
-	char cmd_buf[CMD_BUF_SIZE];
-	size_t cmd_len = 0;
+	char cmd_buf_uart21[CMD_BUF_SIZE];
+	char cmd_buf_uart20[CMD_BUF_SIZE];
+	size_t cmd_len_uart21 = 0;
+	size_t cmd_len_uart20 = 0;
 	int rc;
 
-	uart_rx_reset(cmd_buf, &cmd_len);
+	uart_rx_reset(cmd_buf_uart21, &cmd_len_uart21);
+	uart_rx_reset(cmd_buf_uart20, &cmd_len_uart20);
 
 	if (!device_is_ready(uart_dev)) {
 		return 0;
+	}
+
+	if (uart20_dev != NULL && device_is_ready(uart20_dev)) {
+		const struct uart_config debug_uart20_cfg = {
+			.baudrate = 115200,
+			.parity = UART_CFG_PARITY_NONE,
+			.stop_bits = UART_CFG_STOP_BITS_1,
+			.data_bits = UART_CFG_DATA_BITS_8,
+			.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
+		};
+
+		(void)uart_configure(uart20_dev, &debug_uart20_cfg);
 	}
 
 	g_led_ready = false;
@@ -224,43 +333,19 @@ int main(void)
 	uart_send_line("====================================");
 
 	while (1) {
-		uint8_t ch;
-		bool handled_uart21 = false;
+		bool handled_uart = false;
 
-		if (uart_poll_in(uart_dev, &ch) == 0) {
-			handled_uart21 = true;
+		process_uart_rx(uart_dev, "RX21_LINE:", cmd_buf_uart21,
+			       &cmd_len_uart21, &handled_uart);
 
-			if (ch == '\r' || ch == '\n') {
-				if (cmd_len > 0) {
-					cmd_buf[cmd_len] = '\0';
-					debug_send_rx_line(cmd_buf, cmd_len);
-					at_handler_process_line(cmd_buf, cmd_len);
-					at_handler_run_deferred_action();
-					uart_rx_reset(cmd_buf, &cmd_len);
-				}
-				continue;
-			}
-
-			if (!uart_rx_is_printable(ch)) {
-				debug_send_label("RX_DROP_NONPRINTABLE:0x");
-				uart_send_hex8(ch);
-				uart_send_str("\r\n");
-				uart_rx_reset(cmd_buf, &cmd_len);
-				continue;
-			}
-
-			if (cmd_len < (CMD_BUF_SIZE - 1U)) {
-				cmd_buf[cmd_len++] = (char)ch;
-			} else {
-				uart_rx_reset(cmd_buf, &cmd_len);
-				debug_send_u32("RX_BUFFER_OVERFLOW:len=", CMD_BUF_SIZE - 1U);
-				uart_send_line("ERROR:BUFFER_OVERFLOW");
-			}
+		if (!at_handler_uart20_service_enabled()) {
+			process_uart_rx(uart20_dev, "RX20_LINE:", cmd_buf_uart20,
+				       &cmd_len_uart20, &handled_uart);
 		}
 
 		at_handler_poll_background();
 
-		if (!handled_uart21) {
+		if (!handled_uart) {
 			k_usleep(100);
 		}
 	}
