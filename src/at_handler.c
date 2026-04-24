@@ -1036,6 +1036,29 @@ static void uart20_rx_reset(void)
 	g_uart20_rx_len = 0U;
 }
 
+static void uart20_init_diag_line(const char *msg)
+{
+	if (g_ctx.uart == NULL || !device_is_ready(g_ctx.uart)) {
+		return;
+	}
+
+	uart_send_str("[UART20_INIT] ");
+	uart_send_line(msg);
+}
+
+static void uart20_init_diag_rc(const char *stage, int32_t rc)
+{
+	if (g_ctx.uart == NULL || !device_is_ready(g_ctx.uart)) {
+		return;
+	}
+
+	uart_send_str("[UART20_INIT] ");
+	uart_send_str(stage);
+	uart_send_str(" rc=");
+	uart_send_s32(rc);
+	uart_send_str("\r\n");
+}
+
 static int at_set_uart20_test_enabled(bool emit_result)
 {
 	static const struct uart_config uart20_cfg = {
@@ -1047,8 +1070,15 @@ static int at_set_uart20_test_enabled(bool emit_result)
 	};
 	int rc;
 
+	if (!emit_result) {
+		uart20_init_diag_line("begin");
+	}
+
 	if (g_uart20_dev == NULL || !device_is_ready(g_uart20_dev)) {
 		g_uart20_test_enabled = false;
+		if (!emit_result) {
+			uart20_init_diag_line("device_missing_or_not_ready");
+		}
 		if (emit_result) {
 			emit_testdata("STATE1", "UART20TEST", "0", "bool",
 				      "uart20_not_ready", "err:HW_NOT_READY");
@@ -1056,7 +1086,14 @@ static int at_set_uart20_test_enabled(bool emit_result)
 		return -ENODEV;
 	}
 
+	if (!emit_result) {
+		uart20_init_diag_line("device_ready");
+		uart20_init_diag_line("configure:start");
+	}
 	rc = uart_configure(g_uart20_dev, &uart20_cfg);
+	if (!emit_result) {
+		uart20_init_diag_rc("configure:done", rc);
+	}
 	if (rc != 0) {
 		g_uart20_test_enabled = false;
 		if (emit_result) {
@@ -1068,6 +1105,13 @@ static int at_set_uart20_test_enabled(bool emit_result)
 
 	g_uart20_test_enabled = true;
 	uart20_rx_reset();
+
+	if (!emit_result) {
+		uart20_init_diag_line("service_enabled");
+		uart20_init_diag_line("probe_tx:start");
+		uart_send_line_dev(g_uart20_dev, "UART20_BOOT_PROBE");
+		uart20_init_diag_line("probe_tx:done");
+	}
 
 	if (emit_result) {
 		emit_testdata("STATE1", "UART20TEST", "1", "bool",

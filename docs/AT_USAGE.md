@@ -10,6 +10,7 @@
 - 默认关闭 `[DBG]` 调试日志
 - 源码中仍保留调试链路与串口鲁棒性增强（如空闲超时提交），后续若需继续定位问题，可再切换到诊断模式
 - `UART20` 的 `whoami -> NRF54LM20A` 测试服务在启动后默认已配置为 `115200 8N1`
+- 当前诊断版在启动时会额外向 `UART21` 输出 `[UART20_INIT] ...` 阶段日志；若 `UART20` 配置成功，还会在 `UART20` 主动发送一次 `UART20_BOOT_PROBE`
 
 - 统一交互口：`UART21`
 - 角色：被动执行（不在固件内强制流程顺序）
@@ -200,6 +201,7 @@ OK
   - `UART20` 在启动后默认已开始监听，无需先发送本命令
   - 本命令仍通过 `UART21` 发送，用于兼容旧治具流程或在异常后重新配置
   - 当 `UART20` 收到 `whoami\r\n` 时，固件在 `UART20` 回复 `NRF54LM20A\r\n`
+  - 当前诊断版启动时，`UART21` 会额外输出 `[UART20_INIT] begin / device_ready / configure:* / probe_tx:*` 等日志，`UART20` 会先收到一次 `UART20_BOOT_PROBE\r\n`
 - 期望反馈示例（`UART21`）：
 
 ```text
@@ -210,6 +212,7 @@ uart20 on
 - 期望反馈示例（`UART20`）：
 
 ```text
+UART20_BOOT_PROBE
 NRF54LM20A
 ```
 
