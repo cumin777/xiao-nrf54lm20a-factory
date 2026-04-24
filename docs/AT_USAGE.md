@@ -160,7 +160,9 @@ accel data:0.012345,-0.023456,9.801234\rgyro data: 0.001111,-0.002222,0.003333
 OK
 ```
 
-- 失败反馈：若 IMU 驱动或 I2C 访问未能在 `CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS` 内返回，命令循环继续运行并输出 `ERROR:HW_TIMEOUT`。
+- 诊断日志：默认关闭。若后续需要定位 IMU 问题，可临时打开 `CONFIG_FACTORY_IMU_TRACE=y`，在同一串口输出 `[IMU] ...` 阶段日志。
+- 关键调用链：`at_handler_early_init()` / `text_handle_imu_get()` -> `at_start_imu_stream_if_needed()` -> `sensor_trigger_set(SENSOR_TRIG_DATA_READY)` -> 后台 trigger handler 执行 `sensor_sample_fetch()` + `sensor_channel_get()` 更新缓存 -> `imu get` 只读取缓存样本。
+- 当前实现参考 `test_plan/11-zephyr-imu`，启用了 `CONFIG_LSM6DSL_TRIGGER_GLOBAL_THREAD=y`，由启动期/首次访问时通过 `sensor_attr_set(...SAMPLING_FREQUENCY...)` 把 accel/gyro ODR 配到 `26 Hz`，尽量复用已验证可用的 sample 初始化和取样方式。
 
 ### 3.11 `imu off`
 - 功能：兼容治具停止采样命令

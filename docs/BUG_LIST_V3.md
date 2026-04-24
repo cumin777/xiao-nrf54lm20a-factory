@@ -66,6 +66,15 @@ the parser completes command recognition, but the device stops making progress b
   - `at_ensure_imu_ready()`
   - `at_fetch_imu_sample()`
   - underlying regulator / I2C / sensor driver access
+- The live call chain is:
+  - `dispatch_text_command()`
+  - `text_handle_imu_get()`
+  - `at_get_imu_sample_direct()`
+  - `at_ensure_imu_ready()`
+  - `at_start_imu_stream_if_needed()`
+  - `sensor_trigger_set(SENSOR_TRIG_DATA_READY)`
+  - background trigger handler fetches one sample into cache
+  - `at_fetch_imu_sample()` copies the cached sample to the text/AT response
 
 ### Evidence Seen So Far
 
@@ -85,7 +94,10 @@ and then no further response was observed.
 
 ### Planned Follow-up
 
-- `imu get` and `AT+IMU6D` now execute IMU sampling in a dedicated worker thread and wait only up to `CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS`.
-- If the IMU path blocks, UART21 returns `ERROR:HW_TIMEOUT` / `ERROR:HW_BUSY` on subsequent attempts instead of blocking the main command loop.
+- `imu get` and `AT+IMU6D` have been restored to the known-good pre-worker direct sampling path used by the earlier AT implementation.
+- The IMU path is now aligned more closely with `test_plan/11-zephyr-imu`: `CONFIG_LSM6DSL_TRIGGER_GLOBAL_THREAD=y`, `CONFIG_MAIN_STACK_SIZE=2048`, `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=2048`, and runtime `26 Hz` accel/gyro ODR configured through `sensor_attr_set(...)` before trigger enable.
+- Instead of doing a synchronous IMU bus transaction inside `imu get`, the factory firmware now starts the IMU stream once and caches samples from the driver's data-ready callback path. `imu get` only reads the cached sample.
+- Diagnostic builds can enable `CONFIG_FACTORY_IMU_TRACE=y` to emit `[IMU]` stage markers before and after regulator enable, device init, stream setup, and cache fetch.
+- The failed worker/timeout layer added after the initial V3 text protocol was removed from the active IMU path because hardware logs showed execution stopped before the worker thread ever reached `worker:thread_start`.
 - The text response format was corrected to `accel data:<x>,<y>,<z>\rgyro data: <gx>,<gy>,<gz>\r\n`.
-- Remaining hardware follow-up: collect one real-board `imu get` log to confirm whether the underlying IMU path completes normally or still times out.
+- Remaining hardware follow-up: collect one real-board `imu get` log to confirm whether the restored direct IMU path completes normally.

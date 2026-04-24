@@ -107,13 +107,12 @@ config FACTORY_DMIC_READ_TIMEOUT_MS
 	help
 	  Timeout used while waiting for one DMIC block in AT+MICAMP.
 
-config FACTORY_IMU_SAMPLE_TIMEOUT_MS
-	int "IMU sample timeout (ms)"
-	range 100 5000
-	default 800
+config FACTORY_IMU_TRACE
+	bool "Emit IMU sampling trace lines on UART"
+	default n
 	help
-	  Timeout used by UART21 text command 'imu get' and AT+IMU6D while
-	  waiting for one six-axis IMU sample. A timeout keeps the command
-	  loop alive and reports ERROR:HW_TIMEOUT instead of blocking UART21.
+	  Emit [IMU] stage markers around the imu get / AT+IMU6D call chain.
+	  This is intended for diagnosing hangs in regulator, device init, I2C,
+	  and sensor fetch calls. Disable it for a quiet production factory log.
 
 endmenu

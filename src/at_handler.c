@@ -85,16 +85,15 @@
 #define CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS 1000
 #endif
 
-#ifndef CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS
-#define CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS 800
+#ifndef CONFIG_FACTORY_IMU_TRACE
+#define CONFIG_FACTORY_IMU_TRACE 0
 #endif
 
 #define FACTORY_ADC_CHANNEL_COUNT 8
 #define FACTORY_CMD_PARSE_BUF_SIZE 160
 #define FACTORY_TEXT_CMD_MAX_TOKENS 6
 #define FACTORY_UART20_BUF_SIZE 32
-#define FACTORY_IMU_WORKER_STACK_SIZE 4096
-#define FACTORY_IMU_WORKER_PRIORITY K_PRIO_PREEMPT(8)
+#define FACTORY_IMU_FIRST_SAMPLE_WAIT_MS 200
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 #define ADC_NODE ZEPHYR_USER_NODE
 
@@ -128,14 +127,13 @@ struct gpio_text_pair_state {
 	uint8_t output_idx;
 };
 
-struct imu_sample_values {
+struct imu_sample_cache {
 	struct sensor_value accel_x;
 	struct sensor_value accel_y;
 	struct sensor_value accel_z;
 	struct sensor_value gyro_x;
 	struct sensor_value gyro_y;
 	struct sensor_value gyro_z;
-	int rc;
 };
 
 static struct at_ctx g_ctx;
@@ -184,15 +182,10 @@ static bool g_sleepi_system_off_pending;
 
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
 static const struct device *const g_imu_dev = DEVICE_DT_GET(DT_ALIAS(imu0));
-K_THREAD_STACK_DEFINE(g_imu_worker_stack, FACTORY_IMU_WORKER_STACK_SIZE);
-static struct k_thread g_imu_worker_thread;
-static struct imu_sample_values g_imu_worker_result;
-static struct k_sem g_imu_worker_start_sem;
-static struct k_sem g_imu_worker_done_sem;
-static atomic_t g_imu_worker_started;
-static atomic_t g_imu_worker_busy;
-static atomic_t g_imu_worker_request_id;
-static atomic_t g_imu_worker_done_id;
+static struct imu_sample_cache g_imu_latest_sample;
+static K_MUTEX_DEFINE(g_imu_sample_lock);
+static atomic_t g_imu_sample_ready;
+static atomic_t g_imu_stream_started;
 #endif
 
 #if DT_NODE_EXISTS(DT_ALIAS(dmic20))
@@ -395,6 +388,150 @@ static void debug_send_s32(const char *label, int32_t value)
 	uart_send_s32(value);
 	uart_send_str("\r\n");
 }
+
+static void imu_trace_line(const char *stage)
+{
+#if CONFIG_FACTORY_IMU_TRACE
+	uart_send_str("[IMU] ");
+	uart_send_line(stage);
+#else
+	ARG_UNUSED(stage);
+#endif
+}
+
+static void imu_trace_rc(const char *stage, int rc)
+{
+#if CONFIG_FACTORY_IMU_TRACE
+	uart_send_str("[IMU] ");
+	uart_send_str(stage);
+	uart_send_str(" rc=");
+	uart_send_s32(rc);
+	uart_send_str("\r\n");
+#else
+	ARG_UNUSED(stage);
+	ARG_UNUSED(rc);
+#endif
+}
+
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+static int at_imu_store_latest_sample(const struct device *dev)
+{
+	struct imu_sample_cache sample;
+	int ret;
+
+	ret = sensor_sample_fetch(dev);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(dev, SENSOR_CHAN_ACCEL_X, &sample.accel_x);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(dev, SENSOR_CHAN_ACCEL_Y, &sample.accel_y);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(dev, SENSOR_CHAN_ACCEL_Z, &sample.accel_z);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(dev, SENSOR_CHAN_GYRO_X, &sample.gyro_x);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(dev, SENSOR_CHAN_GYRO_Y, &sample.gyro_y);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_channel_get(dev, SENSOR_CHAN_GYRO_Z, &sample.gyro_z);
+	if (ret != 0) {
+		return ret;
+	}
+
+	k_mutex_lock(&g_imu_sample_lock, K_FOREVER);
+	g_imu_latest_sample = sample;
+	k_mutex_unlock(&g_imu_sample_lock);
+	atomic_set(&g_imu_sample_ready, 1);
+
+	return 0;
+}
+
+static int at_imu_set_sampling_freq(const struct device *dev)
+{
+	struct sensor_value odr_attr = {
+		.val1 = 26,
+		.val2 = 0,
+	};
+	int ret;
+
+	ret = sensor_attr_set(dev, SENSOR_CHAN_ACCEL_XYZ,
+			      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sensor_attr_set(dev, SENSOR_CHAN_GYRO_XYZ,
+			      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
+	return ret;
+}
+
+#ifdef CONFIG_LSM6DSL_TRIGGER
+static void at_imu_trigger_handler(const struct device *dev,
+				   const struct sensor_trigger *trig)
+{
+	int ret;
+
+	ARG_UNUSED(trig);
+
+	ret = at_imu_store_latest_sample(dev);
+	if (ret != 0) {
+		atomic_set(&g_imu_sample_ready, 0);
+	}
+}
+#endif
+
+static int at_start_imu_stream_if_needed(void)
+{
+#ifdef CONFIG_LSM6DSL_TRIGGER
+	struct sensor_trigger trig = {
+		.type = SENSOR_TRIG_DATA_READY,
+		.chan = SENSOR_CHAN_ACCEL_XYZ,
+	};
+	int ret;
+
+	if (!atomic_cas(&g_imu_stream_started, 0, 1)) {
+		imu_trace_line("stream:already_started");
+		return 0;
+	}
+
+	atomic_set(&g_imu_sample_ready, 0);
+
+	ret = at_imu_set_sampling_freq(g_imu_dev);
+	imu_trace_rc("stream:set_sampling_freq", ret);
+	if (ret != 0) {
+		atomic_set(&g_imu_stream_started, 0);
+		return ret;
+	}
+
+	ret = sensor_trigger_set(g_imu_dev, &trig, at_imu_trigger_handler);
+	imu_trace_rc("stream:trigger_set", ret);
+	if (ret != 0) {
+		atomic_set(&g_imu_stream_started, 0);
+		return ret;
+	}
+
+	return 0;
+#else
+	return at_imu_store_latest_sample(g_imu_dev);
+#endif
+}
+#endif
 
 static void emit_testdata(const char *state, const char *item,
 			  const char *value, const char *unit,
@@ -1045,11 +1182,15 @@ static int at_enable_imu_power(void)
 {
 	int ret;
 
+	imu_trace_line("power:begin");
+
 #if DT_NODE_EXISTS(DT_NODELABEL(power_en))
 	if (!device_is_ready(g_power_en_dev)) {
+		imu_trace_line("power:power_en_not_ready");
 		return -ENODEV;
 	}
 	ret = regulator_enable(g_power_en_dev);
+	imu_trace_rc("power:power_en_enable", ret);
 	if (ret < 0 && ret != -EALREADY) {
 		return -ENODEV;
 	}
@@ -1057,15 +1198,19 @@ static int at_enable_imu_power(void)
 
 #if DT_NODE_EXISTS(DT_NODELABEL(imu_vdd))
 	if (!device_is_ready(g_imu_vdd_dev)) {
+		imu_trace_line("power:imu_vdd_not_ready");
 		return -ENODEV;
 	}
 	ret = regulator_enable(g_imu_vdd_dev);
+	imu_trace_rc("power:imu_vdd_enable", ret);
 	if (ret < 0 && ret != -EALREADY) {
 		return -ENODEV;
 	}
 #endif
 
+	imu_trace_line("power:settle_20ms");
 	k_sleep(K_MSEC(20));
+	imu_trace_line("power:done");
 	return 0;
 }
 
@@ -1074,24 +1219,37 @@ static int at_ensure_imu_ready(void)
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
 	int ret;
 
+	imu_trace_line("ensure:begin");
+
+	if (device_is_ready(g_imu_dev)) {
+		imu_trace_line("ensure:already_ready_skip_power");
+		return 0;
+	}
+
 	ret = at_enable_imu_power();
 	if (ret != 0) {
+		imu_trace_rc("ensure:power_failed", ret);
 		return ret;
 	}
 
 	if (!device_is_ready(g_imu_dev)) {
+		imu_trace_line("ensure:device_init_begin");
 		ret = device_init(g_imu_dev);
+		imu_trace_rc("ensure:device_init", ret);
 		if (ret < 0 && ret != -EALREADY) {
 			return ret;
 		}
 	}
 
 	if (!device_is_ready(g_imu_dev)) {
+		imu_trace_line("ensure:not_ready_after_init");
 		return -ENODEV;
 	}
 
+	imu_trace_line("ensure:ready");
 	return 0;
 #else
+	imu_trace_line("ensure:alias_missing");
 	return -ENODEV;
 #endif
 }
@@ -1104,67 +1262,30 @@ static int at_fetch_imu_sample(struct sensor_value *accel_x,
 			       struct sensor_value *gyro_z)
 {
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
-	struct sensor_value odr_attr = {
-		.val1 = 26,
-		.val2 = 0,
-	};
-	int ret;
+	int64_t deadline = k_uptime_get() + FACTORY_IMU_FIRST_SAMPLE_WAIT_MS;
 
-	ret = sensor_attr_set(g_imu_dev, SENSOR_CHAN_ACCEL_XYZ,
-			      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
-	if (ret != 0) {
-		return ret;
+	imu_trace_line("fetch:begin");
+
+	imu_trace_line("fetch:wait_cached_sample");
+	while (!atomic_get(&g_imu_sample_ready) && k_uptime_get() < deadline) {
+		k_sleep(K_MSEC(10));
 	}
 
-	ret = sensor_attr_set(g_imu_dev, SENSOR_CHAN_GYRO_XYZ,
-			      SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr);
-	if (ret != 0) {
-		return ret;
+	if (!atomic_get(&g_imu_sample_ready)) {
+		imu_trace_line("fetch:cached_sample_timeout");
+		return -ETIMEDOUT;
 	}
 
-	/* Wait one ODR period so the first single-shot read is not a stale zero frame. */
-	k_sleep(K_MSEC(40));
+	k_mutex_lock(&g_imu_sample_lock, K_FOREVER);
+	*accel_x = g_imu_latest_sample.accel_x;
+	*accel_y = g_imu_latest_sample.accel_y;
+	*accel_z = g_imu_latest_sample.accel_z;
+	*gyro_x = g_imu_latest_sample.gyro_x;
+	*gyro_y = g_imu_latest_sample.gyro_y;
+	*gyro_z = g_imu_latest_sample.gyro_z;
+	k_mutex_unlock(&g_imu_sample_lock);
 
-	ret = sensor_sample_fetch_chan(g_imu_dev, SENSOR_CHAN_ACCEL_XYZ);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_X, accel_x);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Y, accel_y);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_ACCEL_Z, accel_z);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = sensor_sample_fetch_chan(g_imu_dev, SENSOR_CHAN_GYRO_XYZ);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_X, gyro_x);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Y, gyro_y);
-	if (ret != 0) {
-		return ret;
-	}
-
-	ret = sensor_channel_get(g_imu_dev, SENSOR_CHAN_GYRO_Z, gyro_z);
-	if (ret != 0) {
-		return ret;
-	}
-
+	imu_trace_line("fetch:done");
 	return 0;
 #else
 	ARG_UNUSED(accel_x);
@@ -1173,24 +1294,39 @@ static int at_fetch_imu_sample(struct sensor_value *accel_x,
 	ARG_UNUSED(gyro_x);
 	ARG_UNUSED(gyro_y);
 	ARG_UNUSED(gyro_z);
+	imu_trace_line("fetch:alias_missing");
 	return -ENODEV;
 #endif
 }
 
-static int at_sample_imu_sync(struct sensor_value *accel_x,
-			      struct sensor_value *accel_y,
-			      struct sensor_value *accel_z,
-			      struct sensor_value *gyro_x,
-			      struct sensor_value *gyro_y,
-			      struct sensor_value *gyro_z)
+static int at_get_imu_sample_direct(struct sensor_value *accel_x,
+				    struct sensor_value *accel_y,
+				    struct sensor_value *accel_z,
+				    struct sensor_value *gyro_x,
+				    struct sensor_value *gyro_y,
+				    struct sensor_value *gyro_z)
 {
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
-	if (!device_is_ready(g_imu_dev)) {
-		return -ENODEV;
+	int ret;
+
+	imu_trace_line("direct:begin");
+
+	ret = at_ensure_imu_ready();
+	if (ret != 0) {
+		imu_trace_rc("direct:ensure_failed", ret);
+		return ret;
 	}
 
-	return at_fetch_imu_sample(accel_x, accel_y, accel_z,
-				   gyro_x, gyro_y, gyro_z);
+	ret = at_start_imu_stream_if_needed();
+	if (ret != 0) {
+		imu_trace_rc("direct:start_stream_failed", ret);
+		return ret;
+	}
+
+	ret = at_fetch_imu_sample(accel_x, accel_y, accel_z,
+				  gyro_x, gyro_y, gyro_z);
+	imu_trace_rc("direct:fetch_done", ret);
+	return ret;
 #else
 	ARG_UNUSED(accel_x);
 	ARG_UNUSED(accel_y);
@@ -1198,103 +1334,7 @@ static int at_sample_imu_sync(struct sensor_value *accel_x,
 	ARG_UNUSED(gyro_x);
 	ARG_UNUSED(gyro_y);
 	ARG_UNUSED(gyro_z);
-	return -ENODEV;
-#endif
-}
-
-#if DT_NODE_EXISTS(DT_ALIAS(imu0))
-static void at_imu_worker_thread_fn(void *p1, void *p2, void *p3)
-{
-	ARG_UNUSED(p1);
-	ARG_UNUSED(p2);
-	ARG_UNUSED(p3);
-
-	while (1) {
-		atomic_val_t request_id;
-
-		(void)k_sem_take(&g_imu_worker_start_sem, K_FOREVER);
-		request_id = atomic_get(&g_imu_worker_request_id);
-
-		g_imu_worker_result.rc =
-			at_sample_imu_sync(&g_imu_worker_result.accel_x,
-					   &g_imu_worker_result.accel_y,
-					   &g_imu_worker_result.accel_z,
-					   &g_imu_worker_result.gyro_x,
-					   &g_imu_worker_result.gyro_y,
-					   &g_imu_worker_result.gyro_z);
-
-		atomic_set(&g_imu_worker_done_id, request_id);
-		atomic_set(&g_imu_worker_busy, 0);
-		k_sem_give(&g_imu_worker_done_sem);
-	}
-}
-
-static void at_ensure_imu_worker_started(void)
-{
-	if (!atomic_cas(&g_imu_worker_started, 0, 1)) {
-		return;
-	}
-
-	k_sem_init(&g_imu_worker_start_sem, 0, 1);
-	k_sem_init(&g_imu_worker_done_sem, 0, 1);
-	(void)k_thread_create(&g_imu_worker_thread, g_imu_worker_stack,
-			      K_THREAD_STACK_SIZEOF(g_imu_worker_stack),
-			      at_imu_worker_thread_fn, NULL, NULL, NULL,
-			      FACTORY_IMU_WORKER_PRIORITY, 0, K_NO_WAIT);
-}
-#endif
-
-static int at_get_imu_sample_with_timeout(struct sensor_value *accel_x,
-					  struct sensor_value *accel_y,
-					  struct sensor_value *accel_z,
-					  struct sensor_value *gyro_x,
-					  struct sensor_value *gyro_y,
-					  struct sensor_value *gyro_z)
-{
-#if DT_NODE_EXISTS(DT_ALIAS(imu0))
-	atomic_val_t request_id;
-	int rc;
-
-	at_ensure_imu_worker_started();
-
-	if (!atomic_cas(&g_imu_worker_busy, 0, 1)) {
-		return -EBUSY;
-	}
-
-	while (k_sem_take(&g_imu_worker_done_sem, K_NO_WAIT) == 0) {
-	}
-
-	request_id = atomic_get(&g_imu_worker_request_id) + 1;
-	atomic_set(&g_imu_worker_request_id, request_id);
-	k_sem_give(&g_imu_worker_start_sem);
-
-	rc = k_sem_take(&g_imu_worker_done_sem,
-			K_MSEC(CONFIG_FACTORY_IMU_SAMPLE_TIMEOUT_MS));
-	if (rc != 0) {
-		/* Worker may be stuck; reset busy flag so future calls can retry. */
-		atomic_set(&g_imu_worker_busy, 0);
-		return -ETIMEDOUT;
-	}
-
-	if (atomic_get(&g_imu_worker_done_id) != request_id) {
-		return -ETIMEDOUT;
-	}
-
-	*accel_x = g_imu_worker_result.accel_x;
-	*accel_y = g_imu_worker_result.accel_y;
-	*accel_z = g_imu_worker_result.accel_z;
-	*gyro_x = g_imu_worker_result.gyro_x;
-	*gyro_y = g_imu_worker_result.gyro_y;
-	*gyro_z = g_imu_worker_result.gyro_z;
-
-	return g_imu_worker_result.rc;
-#else
-	ARG_UNUSED(accel_x);
-	ARG_UNUSED(accel_y);
-	ARG_UNUSED(accel_z);
-	ARG_UNUSED(gyro_x);
-	ARG_UNUSED(gyro_y);
-	ARG_UNUSED(gyro_z);
+	imu_trace_line("direct:alias_missing");
 	return -ENODEV;
 #endif
 }
@@ -1826,14 +1866,17 @@ static int at_handle_imu6d(void)
 	struct sensor_value gyro_x, gyro_y, gyro_z;
 	int rc;
 
-	rc = at_get_imu_sample_with_timeout(&accel_x, &accel_y, &accel_z,
-					    &gyro_x, &gyro_y, &gyro_z);
+	imu_trace_line("at_imu6d:begin");
+	rc = at_get_imu_sample_direct(&accel_x, &accel_y, &accel_z,
+				      &gyro_x, &gyro_y, &gyro_z);
 	if (rc != 0) {
+		imu_trace_rc("at_imu6d:error", rc);
 		emit_testdata("STATE4", "IMU6D", "0", "sample", "imu_not_ready",
 			      "err:HW_NOT_READY_OR_TIMEOUT");
 		return rc;
 	}
 
+	imu_trace_line("at_imu6d:emit_result");
 	uart_send_str("+TESTDATA:STATE4,ITEM=IMU6D,VALUE=1,UNIT=sample,RAW=ax_u:");
 	uart_send_s32(sensor_value_to_micro(&accel_x));
 	uart_send_str(";ay_u:");
@@ -1849,6 +1892,7 @@ static int at_handle_imu6d(void)
 	uart_send_line(",META=mode:single_fetch;src:imu0");
 	return 0;
 #else
+	imu_trace_line("at_imu6d:alias_missing");
 	emit_testdata("STATE4", "IMU6D", "0", "sample", "imu_alias_missing",
 		      "err:HW_NOT_READY");
 	return -ENODEV;
@@ -2682,12 +2726,15 @@ static int text_handle_imu_get(void)
 	struct sensor_value gyro_x, gyro_y, gyro_z;
 	int rc;
 
-	rc = at_get_imu_sample_with_timeout(&accel_x, &accel_y, &accel_z,
-					    &gyro_x, &gyro_y, &gyro_z);
+	imu_trace_line("text_imu_get:begin");
+	rc = at_get_imu_sample_direct(&accel_x, &accel_y, &accel_z,
+				      &gyro_x, &gyro_y, &gyro_z);
 	if (rc != 0) {
+		imu_trace_rc("text_imu_get:error", rc);
 		return rc;
 	}
 
+	imu_trace_line("text_imu_get:emit_result");
 	uart_send_str("accel data:");
 	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_x));
 	uart_send_str(",");
@@ -2705,6 +2752,7 @@ static int text_handle_imu_get(void)
 	uart_send_str("\r\n");
 	return 0;
 #else
+	imu_trace_line("text_imu_get:alias_missing");
 	return -ENODEV;
 #endif
 }
@@ -2913,6 +2961,11 @@ void at_handler_init(const struct device *uart_dev,
 	g_uart20_test_enabled = false;
 	uart20_rx_reset();
 	memset(g_gpio_text_pair_state, 0, sizeof(g_gpio_text_pair_state));
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	memset(&g_imu_latest_sample, 0, sizeof(g_imu_latest_sample));
+	atomic_set(&g_imu_sample_ready, 0);
+	atomic_set(&g_imu_stream_started, 0);
+#endif
 #if defined(CONFIG_BT)
 	g_ble_text_scan_active = false;
 	at_ble_scan_reset_stats();
@@ -2935,6 +2988,12 @@ void at_handler_early_init(void)
 			return;
 		}
 	}
+
+	if (!device_is_ready(g_imu_dev)) {
+		return;
+	}
+
+	(void)at_start_imu_stream_if_needed();
 #endif
 }
 
