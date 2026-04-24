@@ -126,14 +126,16 @@ OK
   - 执行 `bt scan off` 后，停止后续周期输出
 
 ### 3.7 `sleep mode`
-- 功能：复用现有 `SLEEPI` 深睡流程，`OK` 后进入 system off
+- 功能：复用现有 `SLEEPI` 深睡流程，回显 `sleep mode` 后进入 system off
 - 期望反馈示例：
 
 ```text
-+TESTDATA:STATE5,ITEM=SLEEPI,...
 sleep mode
-OK
 ```
+
+- 说明：
+  - `sleep mode` 作为 V3 正式文本命令，不再额外输出 `+TESTDATA:STATE5,ITEM=SLEEPI,...`
+  - 若需要结构化 `+TESTDATA`，使用兼容调试接口 `AT+SLEEPI`
 
 ### 3.8 `ship mode`
 - 功能：进入船运模式

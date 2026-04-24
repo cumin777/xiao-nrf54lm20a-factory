@@ -2488,22 +2488,27 @@ static int at_handle_micamp(void)
 	return 0;
 }
 
-static int at_handle_sleepi(void)
+static int at_prepare_sleepi(bool emit_testdata_line)
 {
 	uint32_t old_flags;
 	uint32_t old_reset_cause;
 	int rc;
 
 	if (g_ctx.persist == NULL) {
-		emit_testdata("STATE5", "SLEEPI", "0", "bool", "persist_null",
-			      "err:PRECONDITION_NOT_MET");
+		if (emit_testdata_line) {
+			emit_testdata("STATE5", "SLEEPI", "0", "bool", "persist_null",
+				      "err:PRECONDITION_NOT_MET");
+		}
 		return -EACCES;
 	}
 
 	rc = at_keywake_configure_system_off_wakeup();
 	if (rc != 0) {
-		emit_testdata("STATE5", "SLEEPI", "0", "bool", "sw0_wakeup_not_ready",
-			      "err:HW_NOT_READY");
+		if (emit_testdata_line) {
+			emit_testdata("STATE5", "SLEEPI", "0", "bool",
+				      "sw0_wakeup_not_ready",
+				      "err:HW_NOT_READY");
+		}
 		return rc;
 	}
 
@@ -2522,8 +2527,11 @@ static int at_handle_sleepi(void)
 		g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] = old_flags;
 		g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX] =
 			old_reset_cause;
-		emit_testdata("STATE5", "SLEEPI", "0", "bool", "sleep_state_save_failed",
-			      "err:STORAGE_IO_FAIL");
+		if (emit_testdata_line) {
+			emit_testdata("STATE5", "SLEEPI", "0", "bool",
+				      "sleep_state_save_failed",
+				      "err:STORAGE_IO_FAIL");
+		}
 		return -EIO;
 	}
 
@@ -2533,19 +2541,29 @@ static int at_handle_sleepi(void)
 		g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX] =
 			old_reset_cause;
 		(void)factory_storage_save(g_ctx.persist);
-		emit_testdata("STATE5", "SLEEPI", "0", "bool", "flash_suspend_failed",
-			      "err:HW_NOT_READY");
+		if (emit_testdata_line) {
+			emit_testdata("STATE5", "SLEEPI", "0", "bool",
+				      "flash_suspend_failed",
+				      "err:HW_NOT_READY");
+		}
 		return rc;
 	}
 
 	g_sleepi_system_off_pending = true;
 
-	uart_send_str("+TESTDATA:STATE5,ITEM=SLEEPI,VALUE=1,UNIT=bool,RAW=system_off_armed,META=wakeup:sw0;window_ms:");
-	uart_send_u32(CONFIG_FACTORY_SLEEPI_WINDOW_MS);
-	uart_send_str(";ref_uA:");
-	uart_send_u32(CONFIG_FACTORY_SLEEPI_REF_UA);
-	uart_send_line(";mode:system_off;flash:dpd");
+	if (emit_testdata_line) {
+		uart_send_str("+TESTDATA:STATE5,ITEM=SLEEPI,VALUE=1,UNIT=bool,RAW=system_off_armed,META=wakeup:sw0;window_ms:");
+		uart_send_u32(CONFIG_FACTORY_SLEEPI_WINDOW_MS);
+		uart_send_str(";ref_uA:");
+		uart_send_u32(CONFIG_FACTORY_SLEEPI_REF_UA);
+		uart_send_line(";mode:system_off;flash:dpd");
+	}
 	return 0;
+}
+
+static int at_handle_sleepi(void)
+{
+	return at_prepare_sleepi(true);
 }
 
 static int at_handle_keywake(void)
@@ -3120,7 +3138,7 @@ static int text_handle_bt_scan_off(void)
 
 static int text_handle_sleep_mode(void)
 {
-	int rc = at_handle_sleepi();
+	int rc = at_prepare_sleepi(false);
 
 	if (rc == 0) {
 		uart_send_line("sleep mode");
@@ -3496,7 +3514,7 @@ void at_handler_run_deferred_action(void)
 	(void)hwinfo_clear_reset_cause();
 #endif
 
-	/* Allow the trailing "OK" response to drain before UART21 is suspended. */
+	/* Allow the trailing response to drain before UART21 is suspended. */
 	k_msleep(20);
 
 #if defined(CONFIG_PM_DEVICE)
