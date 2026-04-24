@@ -93,9 +93,10 @@ and then no further response was observed.
 
 ## 3. `sleep mode` keeps LED on and may not enter clean low-power state
 
-- Status: Open
+- Status: Mitigated
 - Priority: High
 - Report Date: 2026-04-24
+- Mitigation Date: 2026-04-24
 
 ### Symptom
 
@@ -110,6 +111,7 @@ the command returns normally, but LED behavior suggests the board may not be ent
 ### Current Understanding
 
 - The firmware path arms `system_off`, configures `SW0` wakeup, suspends external flash into DPD, and then executes deferred `sys_poweroff()`.
+- The sleep path now explicitly drives `led0` to `inactive` before returning the `sleep mode` reply, so LED state should no longer remain latched on because of missing firmware action.
 - If LED remains on after the reply, one of these is likely true:
   - `sys_poweroff()` is not actually reached.
   - The LED state is being held externally or by another hardware block.
@@ -131,8 +133,8 @@ the command returns normally, but LED behavior suggests the board may not be ent
 
 ### Planned Follow-up
 
+- Confirm on real hardware that the new `led0 -> inactive` action takes effect before `system_off`.
 - Confirm whether the deferred `sys_poweroff()` path is actually executed on real hardware.
-- If needed, explicitly drive LED GPIO inactive before entering `system_off`.
 - Compare measured current against the expected deep-sleep baseline instead of relying on LED state alone.
 
 ## 4. `ship mode` wake response is incomplete and post-wake services become unavailable

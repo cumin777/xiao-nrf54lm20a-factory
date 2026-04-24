@@ -136,6 +136,7 @@ sleep mode
 - 说明：
   - `sleep mode` 作为 V3 正式文本命令，不再额外输出 `+TESTDATA:STATE5,ITEM=SLEEPI,...`
   - 若需要结构化 `+TESTDATA`，使用兼容调试接口 `AT+SLEEPI`
+  - 成功进入休眠准备前，固件会显式将 `led0` 置为 inactive，避免 LED 保持点亮造成“疑似未睡眠”的误判
 
 ### 3.8 `ship mode`
 - 功能：进入船运模式

@@ -188,6 +188,9 @@ static const struct gpio_text_pair_desc g_gpio_text_pairs[] = {
 static struct gpio_text_pair_state g_gpio_text_pair_state[ARRAY_SIZE(g_gpio_text_pairs)];
 
 static const struct gpio_dt_spec g_sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+#if DT_NODE_EXISTS(DT_ALIAS(led0))
+static const struct gpio_dt_spec g_led0 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+#endif
 static struct gpio_callback g_sw0_cb_data;
 static bool g_keywake_ready;
 static uint32_t g_keywake_irq_count;
@@ -1325,6 +1328,18 @@ static int at_sleepi_suspend_external_flash(void)
 	return at_sleepi_configure_spi_pins();
 #else
 	return -ENODEV;
+#endif
+}
+
+static void at_sleepi_force_led_off(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(led0))
+	if (!gpio_is_ready_dt(&g_led0)) {
+		return;
+	}
+
+	(void)gpio_pin_configure_dt(&g_led0, GPIO_OUTPUT_INACTIVE);
+	(void)gpio_pin_set_dt(&g_led0, 0);
 #endif
 }
 
@@ -2550,6 +2565,7 @@ static int at_prepare_sleepi(bool emit_testdata_line)
 	}
 
 	g_sleepi_system_off_pending = true;
+	at_sleepi_force_led_off();
 
 	if (emit_testdata_line) {
 		uart_send_str("+TESTDATA:STATE5,ITEM=SLEEPI,VALUE=1,UNIT=bool,RAW=system_off_armed,META=wakeup:sw0;window_ms:");
