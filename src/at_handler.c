@@ -1036,7 +1036,7 @@ static void uart20_rx_reset(void)
 	g_uart20_rx_len = 0U;
 }
 
-static int at_enable_uart20_test(void)
+static int at_set_uart20_test_enabled(bool emit_result)
 {
 	static const struct uart_config uart20_cfg = {
 		.baudrate = 115200,
@@ -1048,25 +1048,38 @@ static int at_enable_uart20_test(void)
 	int rc;
 
 	if (g_uart20_dev == NULL || !device_is_ready(g_uart20_dev)) {
-		emit_testdata("STATE1", "UART20TEST", "0", "bool",
-			      "uart20_not_ready", "err:HW_NOT_READY");
+		g_uart20_test_enabled = false;
+		if (emit_result) {
+			emit_testdata("STATE1", "UART20TEST", "0", "bool",
+				      "uart20_not_ready", "err:HW_NOT_READY");
+		}
 		return -ENODEV;
 	}
 
 	rc = uart_configure(g_uart20_dev, &uart20_cfg);
 	if (rc != 0) {
-		emit_testdata("STATE1", "UART20TEST", "0", "bool",
-			      "uart20_config_failed", "err:HW_NOT_READY");
+		g_uart20_test_enabled = false;
+		if (emit_result) {
+			emit_testdata("STATE1", "UART20TEST", "0", "bool",
+				      "uart20_config_failed", "err:HW_NOT_READY");
+		}
 		return -ENODEV;
 	}
 
 	g_uart20_test_enabled = true;
 	uart20_rx_reset();
 
-	emit_testdata("STATE1", "UART20TEST", "1", "bool",
-		      "uart20_test_enabled",
-		      "uart:uart20;trigger:whoami;reply:NRF54LM20A");
+	if (emit_result) {
+		emit_testdata("STATE1", "UART20TEST", "1", "bool",
+			      "uart20_test_enabled",
+			      "uart:uart20;trigger:whoami;reply:NRF54LM20A");
+	}
 	return 0;
+}
+
+static int at_enable_uart20_test(void)
+{
+	return at_set_uart20_test_enabled(true);
 }
 
 static int at_run_gpio_pairs(const struct device *out_port,
@@ -3325,6 +3338,7 @@ void at_handler_init(const struct device *uart_dev,
 	g_sleepi_system_off_pending = false;
 	g_uart20_test_enabled = false;
 	uart20_rx_reset();
+	(void)at_set_uart20_test_enabled(false);
 	memset(g_gpio_text_pair_state, 0, sizeof(g_gpio_text_pair_state));
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
 	memset(&g_imu_latest_sample, 0, sizeof(g_imu_latest_sample));
