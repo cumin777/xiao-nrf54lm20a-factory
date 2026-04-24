@@ -1046,6 +1046,7 @@ static void uart20_init_diag_line(const char *msg)
 	uart_send_line(msg);
 }
 
+#if defined(CONFIG_UART_USE_RUNTIME_CONFIGURE)
 static void uart20_init_diag_rc(const char *stage, int32_t rc)
 {
 	if (g_ctx.uart == NULL || !device_is_ready(g_ctx.uart)) {
@@ -1058,16 +1059,10 @@ static void uart20_init_diag_rc(const char *stage, int32_t rc)
 	uart_send_s32(rc);
 	uart_send_str("\r\n");
 }
+#endif
 
 static int at_set_uart20_test_enabled(bool emit_result)
 {
-	static const struct uart_config uart20_cfg = {
-		.baudrate = 115200,
-		.parity = UART_CFG_PARITY_NONE,
-		.stop_bits = UART_CFG_STOP_BITS_1,
-		.data_bits = UART_CFG_DATA_BITS_8,
-		.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
-	};
 	int rc;
 
 	if (!emit_result) {
@@ -1088,20 +1083,42 @@ static int at_set_uart20_test_enabled(bool emit_result)
 
 	if (!emit_result) {
 		uart20_init_diag_line("device_ready");
-		uart20_init_diag_line("configure:start");
 	}
-	rc = uart_configure(g_uart20_dev, &uart20_cfg);
-	if (!emit_result) {
-		uart20_init_diag_rc("configure:done", rc);
-	}
-	if (rc != 0) {
-		g_uart20_test_enabled = false;
-		if (emit_result) {
-			emit_testdata("STATE1", "UART20TEST", "0", "bool",
-				      "uart20_config_failed", "err:HW_NOT_READY");
+
+#if defined(CONFIG_UART_USE_RUNTIME_CONFIGURE)
+	{
+		static const struct uart_config uart20_cfg = {
+			.baudrate = 115200,
+			.parity = UART_CFG_PARITY_NONE,
+			.stop_bits = UART_CFG_STOP_BITS_1,
+			.data_bits = UART_CFG_DATA_BITS_8,
+			.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
+		};
+
+		if (!emit_result) {
+			uart20_init_diag_line("configure:start");
 		}
-		return -ENODEV;
+		rc = uart_configure(g_uart20_dev, &uart20_cfg);
+		if (!emit_result) {
+			uart20_init_diag_rc("configure:done", rc);
+		}
+		if (rc != 0) {
+			g_uart20_test_enabled = false;
+			if (emit_result) {
+				emit_testdata("STATE1", "UART20TEST", "0", "bool",
+					      "uart20_config_failed",
+					      "err:HW_NOT_READY");
+			}
+			return -ENODEV;
+		}
 	}
+#else
+	rc = 0;
+	if (!emit_result) {
+		uart20_init_diag_line("configure:skip_runtime_config_disabled");
+		uart20_init_diag_line("configure:use_dts_current_speed=115200");
+	}
+#endif
 
 	g_uart20_test_enabled = true;
 	uart20_rx_reset();
