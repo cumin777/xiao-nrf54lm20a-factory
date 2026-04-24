@@ -107,6 +107,21 @@ config FACTORY_DMIC_READ_TIMEOUT_MS
 	help
 	  Timeout used while waiting for one DMIC block in AT+MICAMP.
 
+config FACTORY_BLE_TRACE
+	bool "Emit BLE scan trace lines on UART"
+	default n
+	help
+	  Emit [BLE] stage markers around bt init, bt scan on, and bt scan off
+	  to diagnose blocking or state machine issues in bt_enable() and
+	  bt_le_scan_start()/stop().
+
+config FACTORY_BLE_RAW_TRACE
+	bool "Emit BLE raw advertising packets on UART"
+	default n
+	help
+	  Emit one RAW line for each advertising callback while bt scan is
+	  active. Intended for diagnosing missing advertisers and packet types.
+
 config FACTORY_IMU_TRACE
 	bool "Emit IMU sampling trace lines on UART"
 	default n

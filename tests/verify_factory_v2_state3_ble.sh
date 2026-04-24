@@ -7,6 +7,7 @@ cd "$repo_root"
 # State3 BLE should use real Zephyr BT scan path
 rg -n "bt_enable|bt_le_scan_start|bt_le_scan_stop|BT_GAP_ADV_TYPE_ADV_IND" src/at_handler.c >/dev/null
 rg -n "CONFIG_FACTORY_BLE_SCAN_WINDOW_MS|CONFIG_FACTORY_BLE_RSSI_REF_DBM" src/at_handler.c >/dev/null
+rg -n "BT_LE_SCAN_TYPE_PASSIVE|\\.options = 0|\\.window = BT_GAP_SCAN_FAST_INTERVAL" src/at_handler.c >/dev/null
 
 # State3 BLE placeholder must be removed
 if rg -n "STATE3\", \"BLESCAN\", \"err:BLE_NOT_READY" src/at_handler.c >/dev/null; then

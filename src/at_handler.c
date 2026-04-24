@@ -19,6 +19,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/spinlock.h>
 #include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
@@ -85,6 +86,14 @@
 #define CONFIG_FACTORY_DMIC_READ_TIMEOUT_MS 1000
 #endif
 
+#ifndef CONFIG_FACTORY_BLE_TRACE
+#define CONFIG_FACTORY_BLE_TRACE 0
+#endif
+
+#ifndef CONFIG_FACTORY_BLE_RAW_TRACE
+#define CONFIG_FACTORY_BLE_RAW_TRACE 0
+#endif
+
 #ifndef CONFIG_FACTORY_IMU_TRACE
 #define CONFIG_FACTORY_IMU_TRACE 0
 #endif
@@ -94,6 +103,10 @@
 #define FACTORY_TEXT_CMD_MAX_TOKENS 6
 #define FACTORY_UART20_BUF_SIZE 32
 #define FACTORY_IMU_FIRST_SAMPLE_WAIT_MS 200
+#define FACTORY_IMU_REPORT_PERIOD_MS 500
+#define FACTORY_BLE_TOP_DEVICE_COUNT 5
+#define FACTORY_BLE_TRACKED_DEVICE_MAX 128
+#define FACTORY_BLE_REPORT_PERIOD_MS 500
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 #define ADC_NODE ZEPHYR_USER_NODE
 
@@ -186,6 +199,8 @@ static struct imu_sample_cache g_imu_latest_sample;
 static K_MUTEX_DEFINE(g_imu_sample_lock);
 static atomic_t g_imu_sample_ready;
 static atomic_t g_imu_stream_started;
+static atomic_t g_imu_text_report_active;
+static struct k_work_delayable g_imu_text_report_work;
 #endif
 
 #if DT_NODE_EXISTS(DT_ALIAS(dmic20))
@@ -238,24 +253,41 @@ static bool g_parser_debug_logging_enabled;
 static bool g_multi_uart_output_enabled;
 
 #if defined(CONFIG_BT)
+struct ble_tracked_device {
+	bt_addr_le_t addr;
+	int8_t best_rssi;
+	bool used;
+};
+
 struct ble_scan_stats {
 	bool have_first;
 	bool have_best;
 	uint32_t adv_count;
+	uint32_t device_count;
 	int8_t first_rssi;
 	int8_t best_rssi;
 	bt_addr_le_t first_addr;
 	bt_addr_le_t best_addr;
+	struct ble_tracked_device tracked[FACTORY_BLE_TRACKED_DEVICE_MAX];
 };
 
 static bool g_ble_initialized;
 static bool g_ble_text_scan_active;
+static bool g_ble_text_scan_pending;
 static struct ble_scan_stats g_ble_scan_stats;
+static struct k_work_delayable g_ble_text_scan_start_work;
+static struct k_work_delayable g_ble_text_scan_report_work;
+static struct k_spinlock g_ble_scan_lock;
+static void at_ble_scan_snapshot(struct ble_scan_stats *out);
+static void emit_text_ble_scan_results(const char *first_addr, int32_t first_rssi,
+				       const char *best_addr, int32_t best_rssi,
+				       uint32_t adv_count,
+				       const struct ble_scan_stats *snapshot);
 static const struct bt_le_scan_param g_ble_scan_param = {
-	.type = BT_LE_SCAN_TYPE_ACTIVE,
-	.options = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+	.type = BT_LE_SCAN_TYPE_PASSIVE,
+	.options = 0,
 	.interval = BT_GAP_SCAN_FAST_INTERVAL,
-	.window = BT_GAP_SCAN_FAST_WINDOW,
+	.window = BT_GAP_SCAN_FAST_INTERVAL,
 };
 #endif
 
@@ -411,6 +443,63 @@ static void imu_trace_rc(const char *stage, int rc)
 	ARG_UNUSED(stage);
 	ARG_UNUSED(rc);
 #endif
+}
+
+static void ble_trace_line(const char *stage)
+{
+#if CONFIG_FACTORY_BLE_TRACE
+	uart_send_str("[BLE] ");
+	uart_send_line(stage);
+#else
+	ARG_UNUSED(stage);
+#endif
+}
+
+static void ble_trace_rc(const char *stage, int rc)
+{
+#if CONFIG_FACTORY_BLE_TRACE
+	uart_send_str("[BLE] ");
+	uart_send_str(stage);
+	uart_send_str(" rc=");
+	uart_send_s32(rc);
+	uart_send_str("\r\n");
+#else
+	ARG_UNUSED(stage);
+	ARG_UNUSED(rc);
+#endif
+}
+
+static void uart_send_hex8(uint8_t value)
+{
+	static const char hex[] = "0123456789ABCDEF";
+
+	uart_emit_char((uint8_t)hex[(value >> 4) & 0x0F]);
+	uart_emit_char((uint8_t)hex[value & 0x0F]);
+}
+
+static void uart_send_bt_addr(const bt_addr_le_t *addr)
+{
+	if (addr == NULL) {
+		return;
+	}
+
+	for (int i = 5; i >= 0; --i) {
+		uart_send_hex8(addr->a.val[i]);
+		if (i > 0) {
+			uart_emit_char(':');
+		}
+	}
+}
+
+static void uart_send_hex_bytes(const uint8_t *data, size_t len)
+{
+	if (data == NULL) {
+		return;
+	}
+
+	for (size_t i = 0; i < len; ++i) {
+		uart_send_hex8(data[i]);
+	}
 }
 
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
@@ -1299,6 +1388,30 @@ static int at_fetch_imu_sample(struct sensor_value *accel_x,
 #endif
 }
 
+static void emit_text_imu_sample(const struct sensor_value *accel_x,
+				 const struct sensor_value *accel_y,
+				 const struct sensor_value *accel_z,
+				 const struct sensor_value *gyro_x,
+				 const struct sensor_value *gyro_y,
+				 const struct sensor_value *gyro_z)
+{
+	uart_send_str("accel data:");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(accel_x));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(accel_y));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(accel_z));
+	uart_send_str("\r");
+
+	uart_send_str("gyro data: ");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(gyro_x));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(gyro_y));
+	uart_send_str(",");
+	uart_send_fixed6_from_micro(sensor_value_to_micro(gyro_z));
+	uart_send_str("\r\n");
+}
+
 static int at_get_imu_sample_direct(struct sensor_value *accel_x,
 				    struct sensor_value *accel_y,
 				    struct sensor_value *accel_z,
@@ -1338,6 +1451,33 @@ static int at_get_imu_sample_direct(struct sensor_value *accel_x,
 	return -ENODEV;
 #endif
 }
+
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+static void at_imu_text_report_work_handler(struct k_work *work)
+{
+	struct sensor_value accel_x, accel_y, accel_z;
+	struct sensor_value gyro_x, gyro_y, gyro_z;
+	int rc;
+
+	ARG_UNUSED(work);
+
+	if (!atomic_get(&g_imu_text_report_active)) {
+		return;
+	}
+
+	rc = at_get_imu_sample_direct(&accel_x, &accel_y, &accel_z,
+				      &gyro_x, &gyro_y, &gyro_z);
+	if (rc == 0) {
+		emit_text_imu_sample(&accel_x, &accel_y, &accel_z,
+				     &gyro_x, &gyro_y, &gyro_z);
+	}
+
+	if (atomic_get(&g_imu_text_report_active)) {
+		k_work_reschedule(&g_imu_text_report_work,
+				 K_MSEC(FACTORY_IMU_REPORT_PERIOD_MS));
+	}
+}
+#endif
 
 static int at_enable_dmic_power(void)
 {
@@ -1505,18 +1645,25 @@ static int at_ble_ensure_ready(void)
 #if defined(CONFIG_BT)
 	int rc;
 
+	ble_trace_line("ensure:begin");
+
 	if (g_ble_initialized) {
+		ble_trace_line("ensure:already_ready");
 		return 0;
 	}
 
+	ble_trace_line("ensure:bt_enable_begin");
 	rc = bt_enable(NULL);
+	ble_trace_rc("ensure:bt_enable", rc);
 	if (rc < 0 && rc != -EALREADY) {
-		return -ENODEV;
+		return rc;
 	}
 
 	g_ble_initialized = true;
+	ble_trace_line("ensure:ready");
 	return 0;
 #else
+	ble_trace_line("ensure:bt_not_enabled");
 	return -ENODEV;
 #endif
 }
@@ -1524,22 +1671,79 @@ static int at_ble_ensure_ready(void)
 #if defined(CONFIG_BT)
 static bool at_ble_adv_type_supported(uint8_t type)
 {
-	return (type == BT_GAP_ADV_TYPE_ADV_IND) ||
-	       (type == BT_GAP_ADV_TYPE_ADV_DIRECT_IND) ||
-	       (type == BT_GAP_ADV_TYPE_ADV_SCAN_IND) ||
-	       (type == BT_GAP_ADV_TYPE_SCAN_RSP);
+	ARG_UNUSED(type);
+	return true;
+}
+
+static int at_ble_scan_find_tracked_device(const bt_addr_le_t *addr)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(g_ble_scan_stats.tracked); ++i) {
+		if (!g_ble_scan_stats.tracked[i].used) {
+			continue;
+		}
+
+		if (bt_addr_le_cmp(&g_ble_scan_stats.tracked[i].addr, addr) == 0) {
+			return (int)i;
+		}
+	}
+
+	return -ENOENT;
+}
+
+static void at_ble_scan_track_device(const bt_addr_le_t *addr, int8_t rssi)
+{
+	int idx = at_ble_scan_find_tracked_device(addr);
+
+	if (idx >= 0) {
+		if (rssi > g_ble_scan_stats.tracked[idx].best_rssi) {
+			g_ble_scan_stats.tracked[idx].best_rssi = rssi;
+		}
+		return;
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(g_ble_scan_stats.tracked); ++i) {
+		if (g_ble_scan_stats.tracked[i].used) {
+			continue;
+		}
+
+		g_ble_scan_stats.tracked[i].used = true;
+		g_ble_scan_stats.tracked[i].addr = *addr;
+		g_ble_scan_stats.tracked[i].best_rssi = rssi;
+		g_ble_scan_stats.device_count++;
+		return;
+	}
 }
 
 static void at_ble_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 			   struct net_buf_simple *ad)
 {
-	ARG_UNUSED(ad);
+	k_spinlock_key_t key;
 
 	if (!at_ble_adv_type_supported(type)) {
 		return;
 	}
 
+#if CONFIG_FACTORY_BLE_RAW_TRACE
+	uart_send_str("RAW:MAC:");
+	uart_send_bt_addr(addr);
+	uart_send_str(" TYPE:");
+	uart_send_hex8(type);
+	uart_send_str(" RSSI:");
+	uart_send_s32(rssi);
+	uart_send_str(" LEN:");
+	uart_send_u32(ad != NULL ? ad->len : 0U);
+	uart_send_str(" DATA:");
+	if (ad != NULL) {
+		uart_send_hex_bytes(ad->data, ad->len);
+	}
+	uart_send_str("\r\n");
+#else
+	ARG_UNUSED(ad);
+#endif
+
+	key = k_spin_lock(&g_ble_scan_lock);
 	g_ble_scan_stats.adv_count++;
+	at_ble_scan_track_device(addr, rssi);
 
 	if (!g_ble_scan_stats.have_first) {
 		g_ble_scan_stats.have_first = true;
@@ -1552,13 +1756,16 @@ static void at_ble_scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 		g_ble_scan_stats.best_rssi = rssi;
 		bt_addr_le_copy(&g_ble_scan_stats.best_addr, addr);
 	}
+	k_spin_unlock(&g_ble_scan_lock, key);
 }
 #endif
 
 static void at_ble_scan_reset_stats(void)
 {
 #if defined(CONFIG_BT)
+	k_spinlock_key_t key = k_spin_lock(&g_ble_scan_lock);
 	memset(&g_ble_scan_stats, 0, sizeof(g_ble_scan_stats));
+	k_spin_unlock(&g_ble_scan_lock, key);
 #endif
 }
 
@@ -1568,6 +1775,10 @@ static void at_ble_scan_export_stats(char *first_addr, size_t first_addr_len,
 				     int32_t *best_rssi)
 {
 #if defined(CONFIG_BT)
+	struct ble_scan_stats snapshot;
+
+	at_ble_scan_snapshot(&snapshot);
+
 	if (first_addr != NULL && first_addr_len > 0U) {
 		strncpy(first_addr, "none", first_addr_len);
 		first_addr[first_addr_len - 1U] = '\0';
@@ -1587,26 +1798,26 @@ static void at_ble_scan_export_stats(char *first_addr, size_t first_addr_len,
 	}
 
 	if (adv_count != NULL) {
-		*adv_count = g_ble_scan_stats.adv_count;
+		*adv_count = snapshot.adv_count;
 	}
 
-	if (g_ble_scan_stats.have_first) {
+	if (snapshot.have_first) {
 		if (first_addr != NULL && first_addr_len > 0U) {
-			bt_addr_le_to_str(&g_ble_scan_stats.first_addr, first_addr,
+			bt_addr_le_to_str(&snapshot.first_addr, first_addr,
 					  first_addr_len);
 		}
 		if (first_rssi != NULL) {
-			*first_rssi = g_ble_scan_stats.first_rssi;
+			*first_rssi = snapshot.first_rssi;
 		}
 	}
 
-	if (g_ble_scan_stats.have_best) {
+	if (snapshot.have_best) {
 		if (best_addr != NULL && best_addr_len > 0U) {
-			bt_addr_le_to_str(&g_ble_scan_stats.best_addr, best_addr,
+			bt_addr_le_to_str(&snapshot.best_addr, best_addr,
 					  best_addr_len);
 		}
 		if (best_rssi != NULL) {
-			*best_rssi = g_ble_scan_stats.best_rssi;
+			*best_rssi = snapshot.best_rssi;
 		}
 	}
 #else
@@ -1619,85 +1830,185 @@ static void at_ble_scan_export_stats(char *first_addr, size_t first_addr_len,
 	ARG_UNUSED(best_rssi);
 #endif
 }
+
+#if defined(CONFIG_BT)
+static void at_ble_scan_snapshot(struct ble_scan_stats *out)
+{
+	k_spinlock_key_t key;
+
+	if (out == NULL) {
+		return;
+	}
+
+	key = k_spin_lock(&g_ble_scan_lock);
+	*out = g_ble_scan_stats;
+	k_spin_unlock(&g_ble_scan_lock, key);
+}
+#endif
 
 static int at_ble_scan_start_session(bool text_session)
 {
 #if defined(CONFIG_BT)
 	int rc;
 
+	ble_trace_line("scan_start:begin");
 	rc = at_ble_ensure_ready();
 	if (rc != 0) {
+		ble_trace_rc("scan_start:ensure_failed", rc);
 		return rc;
 	}
 
 	if (text_session && g_ble_text_scan_active) {
+		ble_trace_line("scan_start:already_active");
+		return 0;
+	}
+
+	if (text_session && g_ble_text_scan_pending) {
+		ble_trace_line("scan_start:already_pending");
 		return 0;
 	}
 
 	if (!text_session && g_ble_text_scan_active) {
+		ble_trace_line("scan_start:busy");
 		return -EBUSY;
 	}
 
 	at_ble_scan_reset_stats();
+	ble_trace_line("scan_start:bt_le_scan_start_begin");
 	rc = bt_le_scan_start(&g_ble_scan_param, at_ble_scan_cb);
+	ble_trace_rc("scan_start:bt_le_scan_start", rc);
 	if (rc == -EALREADY) {
 		return text_session && g_ble_text_scan_active ? 0 : -EBUSY;
 	}
 
 	if (rc != 0) {
-		return -ENODEV;
+		return rc;
 	}
 
 	if (text_session) {
 		g_ble_text_scan_active = true;
 	}
 
+	ble_trace_line("scan_start:active");
 	return 0;
 #else
 	ARG_UNUSED(text_session);
+	ble_trace_line("scan_start:bt_not_enabled");
 	return -ENODEV;
 #endif
 }
 
+#if defined(CONFIG_BT)
+static void at_ble_text_scan_start_work_handler(struct k_work *work)
+{
+	int rc;
+
+	ARG_UNUSED(work);
+
+	ble_trace_line("scan_work:begin");
+	g_ble_text_scan_pending = false;
+	rc = at_ble_ensure_ready();
+	if (rc != 0) {
+		ble_trace_rc("scan_work:ensure_failed", rc);
+		g_ble_text_scan_active = false;
+		return;
+	}
+
+	rc = at_ble_scan_start_session(true);
+	ble_trace_rc("scan_work:start_session", rc);
+	if (rc != 0) {
+		g_ble_text_scan_active = false;
+		return;
+	}
+
+	k_work_reschedule(&g_ble_text_scan_report_work,
+			 K_MSEC(FACTORY_BLE_REPORT_PERIOD_MS));
+}
+#endif
+
+#if defined(CONFIG_BT)
+static void at_ble_text_scan_report_work_handler(struct k_work *work)
+{
+	struct ble_scan_stats snapshot;
+
+	ARG_UNUSED(work);
+
+	if (!g_ble_text_scan_active) {
+		return;
+	}
+
+	at_ble_scan_snapshot(&snapshot);
+	emit_text_ble_scan_results(NULL, 0, NULL, 0, snapshot.adv_count, &snapshot);
+
+	if (g_ble_text_scan_active) {
+		k_work_reschedule(&g_ble_text_scan_report_work,
+				 K_MSEC(FACTORY_BLE_REPORT_PERIOD_MS));
+	}
+}
+#endif
+
 static int at_ble_scan_stop_session(char *first_addr, size_t first_addr_len,
 				    int32_t *first_rssi, char *best_addr,
 				    size_t best_addr_len, uint32_t *adv_count,
-				    int32_t *best_rssi)
+				    int32_t *best_rssi,
+				    struct ble_scan_stats *snapshot)
 {
 #if defined(CONFIG_BT)
+	bool was_pending = g_ble_text_scan_pending;
+	bool was_active = g_ble_text_scan_active;
 	int rc = 0;
 
-	if (!g_ble_text_scan_active) {
-		if (first_addr != NULL && first_addr_len > 0U) {
-			strncpy(first_addr, "none", first_addr_len);
-			first_addr[first_addr_len - 1U] = '\0';
-		}
-		if (best_addr != NULL && best_addr_len > 0U) {
-			strncpy(best_addr, "none", best_addr_len);
-			best_addr[best_addr_len - 1U] = '\0';
-		}
-		if (first_rssi != NULL) {
-			*first_rssi = -127;
-		}
-		if (best_rssi != NULL) {
-			*best_rssi = -127;
-		}
-		if (adv_count != NULL) {
-			*adv_count = 0U;
-		}
+	ble_trace_line("scan_stop:begin");
+
+	g_ble_text_scan_pending = false;
+	g_ble_text_scan_active = false;
+	(void)k_work_cancel_delayable(&g_ble_text_scan_report_work);
+
+	if (was_pending) {
+		ble_trace_line("scan_stop:cancel_pending");
+		(void)k_work_cancel_delayable(&g_ble_text_scan_start_work);
+		at_ble_scan_reset_stats();
+	}
+
+	if (first_addr != NULL && first_addr_len > 0U) {
+		strncpy(first_addr, "none", first_addr_len);
+		first_addr[first_addr_len - 1U] = '\0';
+	}
+	if (best_addr != NULL && best_addr_len > 0U) {
+		strncpy(best_addr, "none", best_addr_len);
+		best_addr[best_addr_len - 1U] = '\0';
+	}
+	if (first_rssi != NULL) {
+		*first_rssi = -127;
+	}
+	if (best_rssi != NULL) {
+		*best_rssi = -127;
+	}
+	if (adv_count != NULL) {
+		*adv_count = 0U;
+	}
+	if (snapshot != NULL) {
+		memset(snapshot, 0, sizeof(*snapshot));
+	}
+
+	if (was_pending) {
+		ble_trace_line("scan_stop:done");
+		return 0;
+	}
+
+	if (!was_active) {
+		ble_trace_line("scan_stop:not_active");
 		return 0;
 	}
 
 	rc = bt_le_scan_stop();
+	ble_trace_rc("scan_stop:bt_le_scan_stop", rc);
 	if (rc != 0 && rc != -EALREADY) {
-		return -ENODEV;
+		return rc;
 	}
 
-	g_ble_text_scan_active = false;
-	at_ble_scan_export_stats(first_addr, first_addr_len, first_rssi,
-				 best_addr, best_addr_len, adv_count,
-				 best_rssi);
 	at_ble_scan_reset_stats();
+	ble_trace_line("scan_stop:done");
 	return 0;
 #else
 	ARG_UNUSED(first_addr);
@@ -1707,31 +2018,71 @@ static int at_ble_scan_stop_session(char *first_addr, size_t first_addr_len,
 	ARG_UNUSED(best_addr_len);
 	ARG_UNUSED(adv_count);
 	ARG_UNUSED(best_rssi);
+	ARG_UNUSED(snapshot);
+	ble_trace_line("scan_stop:bt_not_enabled");
 	return -ENODEV;
 #endif
 }
 
 static void emit_text_ble_scan_results(const char *first_addr, int32_t first_rssi,
 				       const char *best_addr, int32_t best_rssi,
-				       uint32_t adv_count)
+				       uint32_t adv_count,
+				       const struct ble_scan_stats *snapshot)
 {
-	if (adv_count == 0U) {
-		return;
+	const struct ble_tracked_device *top[FACTORY_BLE_TOP_DEVICE_COUNT] = { 0 };
+
+	ARG_UNUSED(first_addr);
+	ARG_UNUSED(first_rssi);
+	ARG_UNUSED(best_addr);
+	ARG_UNUSED(best_rssi);
+	ARG_UNUSED(adv_count);
+
+	if (snapshot != NULL) {
+		for (size_t i = 0; i < ARRAY_SIZE(snapshot->tracked); ++i) {
+			const struct ble_tracked_device *candidate;
+			size_t insert_pos;
+
+			if (!snapshot->tracked[i].used) {
+				continue;
+			}
+
+			candidate = &snapshot->tracked[i];
+			insert_pos = ARRAY_SIZE(top);
+
+			for (size_t j = 0; j < ARRAY_SIZE(top); ++j) {
+				if (top[j] == NULL ||
+				    candidate->best_rssi > top[j]->best_rssi) {
+					insert_pos = j;
+					break;
+				}
+			}
+
+			if (insert_pos >= ARRAY_SIZE(top)) {
+				continue;
+			}
+
+			for (size_t j = ARRAY_SIZE(top) - 1; j > insert_pos; --j) {
+				top[j] = top[j - 1];
+			}
+			top[insert_pos] = candidate;
+		}
 	}
 
-	uart_send_str("[DEVICE] ");
-	uart_send_str(first_addr);
-	uart_send_str(" RSSI ");
-	uart_send_s32(first_rssi);
-	uart_send_str("\r\n");
+	for (size_t i = 0; i < ARRAY_SIZE(top); ++i) {
+		if (top[i] == NULL) {
+			continue;
+		}
 
-	if (strcmp(best_addr, first_addr) != 0) {
-		uart_send_str("[DEVICE] ");
-		uart_send_str(best_addr);
-		uart_send_str(" RSSI ");
-		uart_send_s32(best_rssi);
+		uart_send_str("MAC:");
+		uart_send_bt_addr(&top[i]->addr);
+		uart_send_str(" RSSI:");
+		uart_send_s32(top[i]->best_rssi);
 		uart_send_str("\r\n");
 	}
+
+	uart_send_str("TOTAL:");
+	uart_send_u32(snapshot != NULL ? snapshot->device_count : 0U);
+	uart_send_str("\r\n");
 }
 
 static int at_ble_scan_collect(char *first_addr, size_t first_addr_len,
@@ -2631,19 +2982,40 @@ static int text_handle_gpio_get(const char *gpio_token, const char *pin_token)
 
 static int text_handle_bt_init(void)
 {
-	int rc = at_ble_ensure_ready();
+	int rc;
+
+	ble_trace_line("text_bt_init:begin");
+	rc = at_ble_ensure_ready();
 
 	if (rc != 0) {
+		ble_trace_rc("text_bt_init:error", rc);
 		return rc;
 	}
 
+	ble_trace_line("text_bt_init:emit_result");
 	uart_send_line("LMP: version 6.0");
 	return 0;
 }
 
 static int text_handle_bt_scan_on(void)
 {
-	return at_ble_scan_start_session(true);
+#if defined(CONFIG_BT)
+	ble_trace_line("text_bt_scan_on:begin");
+
+	if (g_ble_text_scan_active || g_ble_text_scan_pending) {
+		ble_trace_line("text_bt_scan_on:already_active_or_pending");
+		return 0;
+	}
+
+	at_ble_scan_reset_stats();
+	g_ble_text_scan_pending = true;
+	ble_trace_line("text_bt_scan_on:queue_start_work");
+	k_work_reschedule(&g_ble_text_scan_start_work, K_NO_WAIT);
+	return 0;
+#else
+	ble_trace_line("text_bt_scan_on:bt_not_enabled");
+	return -ENODEV;
+#endif
 }
 
 static int text_handle_bt_scan_off(void)
@@ -2656,15 +3028,15 @@ static int text_handle_bt_scan_off(void)
 	uint32_t adv_count = 0U;
 	int rc;
 
+	struct ble_scan_stats snapshot;
+
 	rc = at_ble_scan_stop_session(first_addr, sizeof(first_addr), &first_rssi,
 				      best_addr, sizeof(best_addr), &adv_count,
-				      &best_rssi);
+				      &best_rssi, &snapshot);
 	if (rc != 0) {
 		return rc;
 	}
 
-	emit_text_ble_scan_results(first_addr, first_rssi, best_addr, best_rssi,
-				   adv_count);
 	uart_send_line("bt scan off");
 	return 0;
 #else
@@ -2722,34 +3094,23 @@ static int text_handle_mic_capture(const char *seconds_token)
 static int text_handle_imu_get(void)
 {
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
-	struct sensor_value accel_x, accel_y, accel_z;
-	struct sensor_value gyro_x, gyro_y, gyro_z;
 	int rc;
 
 	imu_trace_line("text_imu_get:begin");
-	rc = at_get_imu_sample_direct(&accel_x, &accel_y, &accel_z,
-				      &gyro_x, &gyro_y, &gyro_z);
+	rc = at_ensure_imu_ready();
 	if (rc != 0) {
 		imu_trace_rc("text_imu_get:error", rc);
 		return rc;
 	}
 
-	imu_trace_line("text_imu_get:emit_result");
-	uart_send_str("accel data:");
-	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_x));
-	uart_send_str(",");
-	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_y));
-	uart_send_str(",");
-	uart_send_fixed6_from_micro(sensor_value_to_micro(&accel_z));
-	uart_send_str("\r");
+	rc = at_start_imu_stream_if_needed();
+	if (rc != 0) {
+		imu_trace_rc("text_imu_get:error", rc);
+		return rc;
+	}
 
-	uart_send_str("gyro data: ");
-	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_x));
-	uart_send_str(",");
-	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_y));
-	uart_send_str(",");
-	uart_send_fixed6_from_micro(sensor_value_to_micro(&gyro_z));
-	uart_send_str("\r\n");
+	atomic_set(&g_imu_text_report_active, 1);
+	k_work_reschedule(&g_imu_text_report_work, K_NO_WAIT);
 	return 0;
 #else
 	imu_trace_line("text_imu_get:alias_missing");
@@ -2759,6 +3120,10 @@ static int text_handle_imu_get(void)
 
 static int text_handle_imu_off(void)
 {
+	atomic_set(&g_imu_text_report_active, 0);
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	(void)k_work_cancel_delayable(&g_imu_text_report_work);
+#endif
 	uart_send_line("imu off");
 	return 0;
 }
@@ -2795,7 +3160,7 @@ static int text_handle_flash_write(const char *value_token)
 
 	uart_send_str("flash ");
 	uart_send_u32(flash_value);
-	uart_send_line(" OK");
+	uart_send_str("\r\n");
 	return 0;
 }
 
@@ -2965,10 +3330,18 @@ void at_handler_init(const struct device *uart_dev,
 	memset(&g_imu_latest_sample, 0, sizeof(g_imu_latest_sample));
 	atomic_set(&g_imu_sample_ready, 0);
 	atomic_set(&g_imu_stream_started, 0);
+	atomic_set(&g_imu_text_report_active, 0);
+	k_work_init_delayable(&g_imu_text_report_work,
+			      at_imu_text_report_work_handler);
 #endif
 #if defined(CONFIG_BT)
 	g_ble_text_scan_active = false;
+	g_ble_text_scan_pending = false;
 	at_ble_scan_reset_stats();
+	k_work_init_delayable(&g_ble_text_scan_start_work,
+			      at_ble_text_scan_start_work_handler);
+	k_work_init_delayable(&g_ble_text_scan_report_work,
+			      at_ble_text_scan_report_work_handler);
 #endif
 }
 

@@ -95,31 +95,32 @@ OK
 ```
 
 ### 3.5 `bt scan on`
-- 功能：启动持续扫描会话；收到 `bt scan off` 前不输出扫描摘要
+- 功能：启动持续扫描会话；扫描期间每 `500 ms` 周期输出一次当前结果摘要
 - 期望反馈示例：
 
 ```text
-OK
+MAC:AA:BB:CC:DD:EE:FF RSSI:-42
+MAC:11:22:33:44:55:66 RSSI:-35
+TOTAL:7
 ```
 
 - 说明：
-  - 当前命令只启动扫描并立即返回 `OK`
-  - 扫描期间统计第一条命中的设备和 RSSI 最强的设备
-  - 最终结果在 `bt scan off` 时统一输出
+  - 扫描期间统计去重后的设备列表
+  - 每个周期按 RSSI 从强到弱输出最多 5 个设备
+  - 每个周期最后一行 `TOTAL:<n>` 表示当前扫描窗口内去重后的设备总量
+  - 当前采用被动、全窗口扫描（无重复过滤），尽量多发现周边广播设备
 
 ### 3.6 `bt scan off`
-- 功能：停止当前扫描会话并输出扫描结果（幂等）
+- 功能：停止当前扫描会话（幂等）
 - 期望反馈示例：
 
 ```text
-[DEVICE] AA:BB:CC:DD:EE:FF (random) RSSI -42
-[DEVICE] 11:22:33:44:55:66 (random) RSSI -35
 bt scan off
 OK
 ```
 
 - 说明：
-  - 若扫描期间没有命中任何广播包，则只输出 `bt scan off` 和 `OK`
+  - 执行 `bt scan off` 后，停止后续周期输出
 
 ### 3.7 `sleep mode`
 - 功能：复用现有 `SLEEPI` 深睡流程，`OK` 后进入 system off
@@ -152,20 +153,21 @@ OK
 ```
 
 ### 3.10 `imu get`
-- 功能：读取单次六轴样本
+- 功能：启动 IMU 周期上报；启动后每 `500 ms` 输出一次六轴样本，直到收到 `imu off`
 - 期望反馈示例：
 
 ```text
 accel data:0.012345,-0.023456,9.801234\rgyro data: 0.001111,-0.002222,0.003333
-OK
+accel data:0.012300,-0.023400,9.801100\rgyro data: 0.001100,-0.002200,0.003300
+...
 ```
 
 - 诊断日志：默认关闭。若后续需要定位 IMU 问题，可临时打开 `CONFIG_FACTORY_IMU_TRACE=y`，在同一串口输出 `[IMU] ...` 阶段日志。
-- 关键调用链：`at_handler_early_init()` / `text_handle_imu_get()` -> `at_start_imu_stream_if_needed()` -> `sensor_trigger_set(SENSOR_TRIG_DATA_READY)` -> 后台 trigger handler 执行 `sensor_sample_fetch()` + `sensor_channel_get()` 更新缓存 -> `imu get` 只读取缓存样本。
+- 关键调用链：`at_handler_early_init()` / `text_handle_imu_get()` -> `at_start_imu_stream_if_needed()` -> `sensor_trigger_set(SENSOR_TRIG_DATA_READY)` -> 后台 trigger handler 执行 `sensor_sample_fetch()` + `sensor_channel_get()` 更新缓存 -> `g_imu_text_report_work` 每 `500 ms` 读取缓存并输出。
 - 当前实现参考 `test_plan/11-zephyr-imu`，启用了 `CONFIG_LSM6DSL_TRIGGER_GLOBAL_THREAD=y`，由启动期/首次访问时通过 `sensor_attr_set(...SAMPLING_FREQUENCY...)` 把 accel/gyro ODR 配到 `26 Hz`，尽量复用已验证可用的 sample 初始化和取样方式。
 
 ### 3.11 `imu off`
-- 功能：兼容治具停止采样命令
+- 功能：停止 `imu get` 启动的周期上报
 - 期望反馈示例：
 
 ```text
@@ -178,7 +180,7 @@ OK
 - 期望反馈示例：
 
 ```text
-flash 7 OK
+flash 7
 OK
 ```
 
