@@ -6,5 +6,6 @@ cd "$repo_root"
 
 test -f docs/BUG_LIST_V3.md
 rg -n "bt scan on|may crash or hang the device|Status: Open" docs/BUG_LIST_V3.md >/dev/null
+rg -n "sleep mode|ship mode|UART20|far fewer devices than a phone|GPIO flip coverage is incomplete" docs/BUG_LIST_V3.md >/dev/null
 
 echo "verify_factory_v3_buglist: PASS"

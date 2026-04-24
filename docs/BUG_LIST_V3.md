@@ -24,23 +24,23 @@ the device appears to crash or stop responding.
 
 ### Reproduction
 
-1. Boot firmware normally
-2. Send `bt init\r\n`
-3. Send `bt scan on\r\n`
-4. Observe whether the device stops replying, resets, or hard-faults
+1. Boot firmware normally.
+2. Send `bt init\r\n`.
+3. Send `bt scan on\r\n`.
+4. Observe whether the device stops replying, resets, or hard-faults.
 
 ### Evidence To Collect Next
 
-- Full serial log before and after `bt scan on`
-- Whether the startup banner reappears after the failure
-- Whether `UART21` and `UART20` both go silent
-- If available: reset cause after reboot
+- Full serial log before and after `bt scan on`.
+- Whether the startup banner reappears after the failure.
+- Whether `UART21` and `UART20` both go silent.
+- If available: reset cause after reboot.
 
 ### Planned Follow-up
 
-- Add a focused BLE crash reproduction checklist
-- Instrument the BLE scan start/stop path with minimal crash-safe markers if needed
-- Verify whether the fault happens in `bt_enable`, `bt_le_scan_start`, or later callback flow
+- Add a focused BLE crash reproduction checklist.
+- Instrument the BLE scan start/stop path with minimal crash-safe markers if needed.
+- Verify whether the fault happens in `bt_enable`, `bt_le_scan_start`, or later callback flow.
 
 ## 2. `imu get` may hang inside the IMU sampling path
 
@@ -86,18 +86,158 @@ PARSE:text_match=imu get
 
 and then no further response was observed.
 
-### Reproduction
-
-1. Boot firmware normally
-2. Send `imu get\r\n`
-3. Observe whether the device stops replying before any `accel data:` / `gyro data:` output
-
 ### Planned Follow-up
 
 - `imu get` and `AT+IMU6D` have been restored to the known-good pre-worker direct sampling path used by the earlier AT implementation.
-- The IMU path is now aligned more closely with `test_plan/11-zephyr-imu`: `CONFIG_LSM6DSL_TRIGGER_GLOBAL_THREAD=y`, `CONFIG_MAIN_STACK_SIZE=2048`, `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE=2048`, and runtime `26 Hz` accel/gyro ODR configured through `sensor_attr_set(...)` before trigger enable.
-- Instead of doing a synchronous IMU bus transaction inside `imu get`, the factory firmware now starts the IMU stream once and caches samples from the driver's data-ready callback path. `imu get` only reads the cached sample.
-- Diagnostic builds can enable `CONFIG_FACTORY_IMU_TRACE=y` to emit `[IMU]` stage markers before and after regulator enable, device init, stream setup, and cache fetch.
-- The failed worker/timeout layer added after the initial V3 text protocol was removed from the active IMU path because hardware logs showed execution stopped before the worker thread ever reached `worker:thread_start`.
-- The text response format was corrected to `accel data:<x>,<y>,<z>\rgyro data: <gx>,<gy>,<gz>\r\n`.
 - Remaining hardware follow-up: collect one real-board `imu get` log to confirm whether the restored direct IMU path completes normally.
+
+## 3. `sleep mode` keeps LED on and may not enter clean low-power state
+
+- Status: Open
+- Priority: High
+- Report Date: 2026-04-24
+
+### Symptom
+
+After sending:
+
+```text
+sleep mode
+```
+
+the command returns normally, but LED behavior suggests the board may not be entering a clean deep-sleep state. User observed that the LED was not turned off.
+
+### Current Understanding
+
+- The firmware path arms `system_off`, configures `SW0` wakeup, suspends external flash into DPD, and then executes deferred `sys_poweroff()`.
+- If LED remains on after the reply, one of these is likely true:
+  - `sys_poweroff()` is not actually reached.
+  - The LED state is being held externally or by another hardware block.
+  - The board does enter low power, but the LED circuit behavior makes the state appear misleading.
+
+### Reproduction
+
+1. Boot firmware normally.
+2. Send `sleep mode\r\n`.
+3. Observe LED state, UART silence, and supply current.
+4. Press `SW0` to confirm wake behavior.
+
+### Evidence To Collect Next
+
+- Whether UART stops immediately after the `sleep mode` reply.
+- Current measurement after the command.
+- Whether pressing `SW0` restarts the board as expected.
+- Whether LED remains on continuously or only latches briefly before power-off.
+
+### Planned Follow-up
+
+- Confirm whether the deferred `sys_poweroff()` path is actually executed on real hardware.
+- If needed, explicitly drive LED GPIO inactive before entering `system_off`.
+- Compare measured current against the expected deep-sleep baseline instead of relying on LED state alone.
+
+## 4. `ship mode` wake response is incomplete and post-wake services become unavailable
+
+- Status: Open
+- Priority: High
+- Report Date: 2026-04-24
+
+### Symptom
+
+After `ship mode`, the wake-up response is incomplete. Following the `ship mode` reply, other system functions are unusable; at minimum, `UART20` is reported as abnormal after wake.
+
+### Current Understanding
+
+- The current ship-mode flow likely lacks enough protection around post-wake reinitialization.
+- The issue may involve partial wake, incomplete regulator/peripheral restore, or stale UART service state after returning from ship-related power transitions.
+- `UART20` behavior is the first confirmed externally visible casualty, but the problem may affect a broader subset of services.
+
+### Reproduction
+
+1. Boot firmware normally.
+2. Send `ship mode\r\n`.
+3. Perform the expected wake operation.
+4. Check whether the wake response is complete and whether `UART20` / other services still function.
+
+### Evidence To Collect Next
+
+- Full serial log before ship mode, during wake, and after wake.
+- Whether the startup banner reappears after wake.
+- Whether `UART21` remains usable while `UART20` fails.
+- Reset cause and any persisted wake flags after recovery.
+
+### Planned Follow-up
+
+- Protect the ship-mode exit / wake path with explicit reinitialization checks.
+- Verify whether UART services need to be re-enabled after ship-mode wake.
+- Narrow whether the failure is limited to `UART20` or indicates a larger post-wake platform init gap.
+
+## 5. `bt scan` discovers far fewer devices than a phone
+
+- Status: Open
+- Priority: Medium
+- Report Date: 2026-04-24
+
+### Symptom
+
+`bt scan` can discover only a small subset of nearby devices. The number of discovered devices is far lower than what a phone can see in the same environment.
+
+### Current Understanding
+
+- This issue is distinct from the possible `bt scan on` crash/hang path.
+- Current firmware uses a constrained BLE scan reporting flow, and the gap may come from one or more of:
+  - passive scan vs. phone behavior
+  - current scan window / interval settings
+  - deduping / caching policy
+  - periodic summary output showing only a reduced subset
+
+### Reproduction
+
+1. Boot firmware normally.
+2. Send `bt init\r\n`.
+3. Send `bt scan on\r\n`.
+4. Compare the discovered device count and visible addresses against a phone in the same location.
+
+### Evidence To Collect Next
+
+- Raw device list seen by phone at the same time.
+- Raw serial output from the board during the same scan window.
+- Whether the missing devices are all weak-RSSI devices or include strong nearby devices.
+
+### Planned Follow-up
+
+- Compare passive and active scan behavior.
+- Revisit scan parameters and report/filter policy.
+- Add a raw-count / raw-address diagnostic mode if needed.
+
+## 6. GPIO flip coverage is incomplete without the fixture
+
+- Status: Open
+- Priority: Medium
+- Report Date: 2026-04-24
+
+### Symptom
+
+GPIO toggling has not been fully validated end-to-end. Without the production fixture connected, not all GPIO paths have actually been exercised.
+
+### Current Understanding
+
+- The firmware contains GPIO pair mapping and text command support, but full production coverage depends on the fixture wiring.
+- Current validation is therefore incomplete for the real jig-connected matrix.
+
+### Reproduction
+
+1. Connect the production fixture.
+2. Execute the full GPIO set/get sequence across all mapped pairs.
+3. Compare actual loopback behavior against the expected fixture wiring.
+
+### Evidence To Collect Next
+
+- Which GPIO pairs have already been manually verified.
+- Full fixture-side test log for all mapped GPIO pairs.
+- Any pair that passes in direct bench testing but fails on the real jig.
+
+### Planned Follow-up
+
+- Run the complete GPIO matrix on the real fixture.
+- Record any pair-specific failures separately from protocol-level issues.
+- Do not treat current bench-only GPIO verification as full production closure.
