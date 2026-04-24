@@ -143,10 +143,12 @@ sleep mode
 - 期望反馈示例：
 
 ```text
-+TESTDATA:TEXT,ITEM=SHIPMODE,...
 ship mode
-OK
 ```
+
+- 说明：
+  - `ship mode` 作为 V3 正式文本命令，不再额外输出 `+TESTDATA:TEXT,ITEM=SHIPMODE,...`
+  - 若需要结构化 `+TESTDATA`，使用兼容调试接口 `AT+SHIPMODEA` / `AT+SHIPMODEB`
 
 ### 3.9 `mic capture <sec>`
 - 功能：采集 DMIC 数据并输出统计值

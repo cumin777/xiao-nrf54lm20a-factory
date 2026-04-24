@@ -2682,31 +2682,39 @@ static int at_handle_flashwrite(void)
 	return 0;
 }
 
-static int at_enter_ship_mode_common(const char *state, const char *phase)
+static int at_enter_ship_mode_common(const char *state, const char *phase,
+				       bool emit_testdata_line)
 {
 	int rc;
 
 	if (g_ctx.regulator_parent == NULL ||
 	    !device_is_ready(g_ctx.regulator_parent)) {
-		emit_testdata(state, "SHIPMODE", "0", "bool",
-			      "regulator_not_ready", "err:HW_NOT_READY");
+		if (emit_testdata_line) {
+			emit_testdata(state, "SHIPMODE", "0", "bool",
+				      "regulator_not_ready", "err:HW_NOT_READY");
+		}
 		return -ENODEV;
 	}
 
 	rc = regulator_parent_ship_mode(g_ctx.regulator_parent);
 	if (rc != 0) {
-		emit_testdata(state, "SHIPMODE", "0", "bool", "ship_mode_failed",
-			      "err:HW_NOT_READY");
+		if (emit_testdata_line) {
+			emit_testdata(state, "SHIPMODE", "0", "bool",
+				      "ship_mode_failed", "err:HW_NOT_READY");
+		}
 		return -ENODEV;
 	}
 
-	emit_testdata(state, "SHIPMODE", "1", "bool", "ship_mode_entered", phase);
+	if (emit_testdata_line) {
+		emit_testdata(state, "SHIPMODE", "1", "bool",
+			      "ship_mode_entered", phase);
+	}
 	return 0;
 }
 
 static int at_handle_shipmode_a(void)
 {
-	return at_enter_ship_mode_common("STATE8A", "phase:A");
+	return at_enter_ship_mode_common("STATE8A", "phase:A", true);
 }
 
 static int at_handle_vbus_b(void)
@@ -2749,7 +2757,7 @@ static int at_handle_v3p3_b(void)
 
 static int at_handle_shipmode_b(void)
 {
-	return at_enter_ship_mode_common("STATE9B", "phase:B");
+	return at_enter_ship_mode_common("STATE9B", "phase:B", true);
 }
 
 struct state_item {
@@ -3185,7 +3193,7 @@ static int text_handle_sleep_mode(void)
 
 static int text_handle_ship_mode(void)
 {
-	int rc = at_enter_ship_mode_common("TEXT", "phase:text");
+	int rc = at_enter_ship_mode_common("TEXT", "phase:text", false);
 
 	if (rc == 0) {
 		uart_send_line("ship mode");
