@@ -8,7 +8,7 @@ cd "$repo_root"
 rg -n "sys_poweroff|PM_DEVICE_ACTION_SUSPEND|hwinfo_clear_reset_cause" src/at_handler.c >/dev/null
 rg -n "GPIO_INT_LEVEL_ACTIVE" src/at_handler.c >/dev/null
 rg -n "DT_NODELABEL\\(py25q64\\)|flash_suspend_failed|system_off_armed" src/at_handler.c >/dev/null
-rg -n "at_sleepi_force_led_off|DT_ALIAS\\(led0\\)|gpio_pin_set_dt\\(&g_led0, 0\\)" src/at_handler.c >/dev/null
+rg -n "at_sleepi_force_led_off|DT_ALIAS\\(led0\\)|DT_ALIAS\\(led1\\)|DT_ALIAS\\(led2\\)|gpio_pin_set_raw\\(g_led0.port, g_led0.pin, 1\\)|gpio_pin_set_raw\\(g_led1.port, g_led1.pin, 1\\)|gpio_pin_set_raw\\(g_led2.port, g_led2.pin, 1\\)" src/at_handler.c >/dev/null
 
 # State5 placeholder must be removed
 if rg -n "STATE5\", \"SLEEPI\", \"err:MEASURE_PATH_TBD" src/at_handler.c >/dev/null; then

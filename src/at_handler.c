@@ -191,6 +191,12 @@ static const struct gpio_dt_spec g_sw0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 #if DT_NODE_EXISTS(DT_ALIAS(led0))
 static const struct gpio_dt_spec g_led0 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 #endif
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+static const struct gpio_dt_spec g_led1 = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+static const struct gpio_dt_spec g_led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+#endif
 static struct gpio_callback g_sw0_cb_data;
 static bool g_keywake_ready;
 static uint32_t g_keywake_irq_count;
@@ -1334,12 +1340,26 @@ static int at_sleepi_suspend_external_flash(void)
 static void at_sleepi_force_led_off(void)
 {
 #if DT_NODE_EXISTS(DT_ALIAS(led0))
-	if (!gpio_is_ready_dt(&g_led0)) {
-		return;
+	/* XIAO nRF54LM20A board LEDs are wired active-low in practice:
+	 * raw 0 -> LED ON, raw 1 -> LED OFF. Do not use dt active/inactive helpers
+	 * here because the current board DTS does not encode that polarity.
+	 */
+	if (gpio_is_ready_dt(&g_led0)) {
+		(void)gpio_pin_configure(g_led0.port, g_led0.pin, GPIO_OUTPUT);
+		(void)gpio_pin_set_raw(g_led0.port, g_led0.pin, 1);
 	}
-
-	(void)gpio_pin_configure_dt(&g_led0, GPIO_OUTPUT_INACTIVE);
-	(void)gpio_pin_set_dt(&g_led0, 0);
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+	if (gpio_is_ready_dt(&g_led1)) {
+		(void)gpio_pin_configure(g_led1.port, g_led1.pin, GPIO_OUTPUT);
+		(void)gpio_pin_set_raw(g_led1.port, g_led1.pin, 1);
+	}
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+	if (gpio_is_ready_dt(&g_led2)) {
+		(void)gpio_pin_configure(g_led2.port, g_led2.pin, GPIO_OUTPUT);
+		(void)gpio_pin_set_raw(g_led2.port, g_led2.pin, 1);
+	}
 #endif
 }
 

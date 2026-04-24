@@ -111,7 +111,8 @@ the command returns normally, but LED behavior suggests the board may not be ent
 ### Current Understanding
 
 - The firmware path arms `system_off`, configures `SW0` wakeup, suspends external flash into DPD, and then executes deferred `sys_poweroff()`.
-- The sleep path now explicitly drives `led0` to `inactive` before returning the `sleep mode` reply, so LED state should no longer remain latched on because of missing firmware action.
+- The first mitigation attempt used `GPIO_OUTPUT_INACTIVE` based on DT semantics, but real hardware behavior indicates the board RGB LEDs are effectively active-low.
+- The current mitigation now forces `led0/led1/led2` to raw high before returning the `sleep mode` reply, matching the board behavior already documented by the BLE sample in `test_plan/15-zephyr-ble-lbs`.
 - If LED remains on after the reply, one of these is likely true:
   - `sys_poweroff()` is not actually reached.
   - The LED state is being held externally or by another hardware block.
@@ -133,7 +134,7 @@ the command returns normally, but LED behavior suggests the board may not be ent
 
 ### Planned Follow-up
 
-- Confirm on real hardware that the new `led0 -> inactive` action takes effect before `system_off`.
+- Confirm on real hardware that the new `led0/led1/led2 -> raw high` action takes effect before `system_off`.
 - Confirm whether the deferred `sys_poweroff()` path is actually executed on real hardware.
 - Compare measured current against the expected deep-sleep baseline instead of relying on LED state alone.
 
