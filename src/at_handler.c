@@ -1045,53 +1045,17 @@ static void uart20_rx_reset(void)
 	g_uart20_rx_len = 0U;
 }
 
-static void uart20_init_diag_line(const char *msg)
-{
-	if (g_ctx.uart == NULL || !device_is_ready(g_ctx.uart)) {
-		return;
-	}
-
-	uart_send_str("[UART20_INIT] ");
-	uart_send_line(msg);
-}
-
-#if defined(CONFIG_UART_USE_RUNTIME_CONFIGURE)
-static void uart20_init_diag_rc(const char *stage, int32_t rc)
-{
-	if (g_ctx.uart == NULL || !device_is_ready(g_ctx.uart)) {
-		return;
-	}
-
-	uart_send_str("[UART20_INIT] ");
-	uart_send_str(stage);
-	uart_send_str(" rc=");
-	uart_send_s32(rc);
-	uart_send_str("\r\n");
-}
-#endif
-
 static int at_set_uart20_test_enabled(bool emit_result)
 {
 	int rc;
 
-	if (!emit_result) {
-		uart20_init_diag_line("begin");
-	}
-
 	if (g_uart20_dev == NULL || !device_is_ready(g_uart20_dev)) {
 		g_uart20_test_enabled = false;
-		if (!emit_result) {
-			uart20_init_diag_line("device_missing_or_not_ready");
-		}
 		if (emit_result) {
 			emit_testdata("STATE1", "UART20TEST", "0", "bool",
 				      "uart20_not_ready", "err:HW_NOT_READY");
 		}
 		return -ENODEV;
-	}
-
-	if (!emit_result) {
-		uart20_init_diag_line("device_ready");
 	}
 
 #if defined(CONFIG_UART_USE_RUNTIME_CONFIGURE)
@@ -1104,13 +1068,7 @@ static int at_set_uart20_test_enabled(bool emit_result)
 			.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
 		};
 
-		if (!emit_result) {
-			uart20_init_diag_line("configure:start");
-		}
 		rc = uart_configure(g_uart20_dev, &uart20_cfg);
-		if (!emit_result) {
-			uart20_init_diag_rc("configure:done", rc);
-		}
 		if (rc != 0) {
 			g_uart20_test_enabled = false;
 			if (emit_result) {
@@ -1123,20 +1081,13 @@ static int at_set_uart20_test_enabled(bool emit_result)
 	}
 #else
 	rc = 0;
-	if (!emit_result) {
-		uart20_init_diag_line("configure:skip_runtime_config_disabled");
-		uart20_init_diag_line("configure:use_dts_current_speed=115200");
-	}
 #endif
 
 	g_uart20_test_enabled = true;
 	uart20_rx_reset();
 
 	if (!emit_result) {
-		uart20_init_diag_line("service_enabled");
-		uart20_init_diag_line("probe_tx:start");
 		uart_send_line_dev(g_uart20_dev, "UART20_BOOT_PROBE");
-		uart20_init_diag_line("probe_tx:done");
 	}
 
 	if (emit_result) {
@@ -2696,8 +2647,55 @@ static int at_enter_ship_mode_common(const char *state, const char *phase,
 		return -ENODEV;
 	}
 
+	/* --- Pre-ship-mode cleanup --- */
+
+	/* 1) Save SHIPMODE_ARMED flag to persistent storage */
+	if (g_ctx.persist != NULL) {
+		g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] |=
+			FACTORY_PERSIST_FLAG_SHIPMODE_ARMED;
+		(void)factory_storage_save(g_ctx.persist);
+	}
+
+	/* 2) Suspend external flash (enter deep power-down) */
+	(void)at_sleepi_suspend_external_flash();
+
+	/* 3) Force all LEDs off */
+	at_sleepi_force_led_off();
+
+	/* 4) Emit testdata response before UART is suspended */
+	if (emit_testdata_line) {
+		emit_testdata(state, "SHIPMODE", "1", "bool",
+			      "ship_mode_entered", phase);
+	}
+
+	/* Allow the trailing response to drain before UART is suspended. */
+	k_msleep(50);
+
+	/* 5) Suspend UART so TX line is clean when power is cut */
+#if defined(CONFIG_PM_DEVICE)
+	if (g_ctx.uart != NULL && device_is_ready(g_ctx.uart)) {
+		(void)pm_device_action_run(g_ctx.uart, PM_DEVICE_ACTION_SUSPEND);
+	}
+#endif
+
+	k_msleep(20);
+
+	/* --- End cleanup, enter ship mode --- */
+
 	rc = regulator_parent_ship_mode(g_ctx.regulator_parent);
 	if (rc != 0) {
+		/* Ship mode failed — resume UART and clear flag */
+#if defined(CONFIG_PM_DEVICE)
+		if (g_ctx.uart != NULL && device_is_ready(g_ctx.uart)) {
+			(void)pm_device_action_run(g_ctx.uart,
+						   PM_DEVICE_ACTION_RESUME);
+		}
+#endif
+		if (g_ctx.persist != NULL) {
+			g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] &=
+				~FACTORY_PERSIST_FLAG_SHIPMODE_ARMED;
+			(void)factory_storage_save(g_ctx.persist);
+		}
 		if (emit_testdata_line) {
 			emit_testdata(state, "SHIPMODE", "0", "bool",
 				      "ship_mode_failed", "err:HW_NOT_READY");
@@ -2705,10 +2703,6 @@ static int at_enter_ship_mode_common(const char *state, const char *phase,
 		return -ENODEV;
 	}
 
-	if (emit_testdata_line) {
-		emit_testdata(state, "SHIPMODE", "1", "bool",
-			      "ship_mode_entered", phase);
-	}
 	return 0;
 }
 
@@ -3193,13 +3187,13 @@ static int text_handle_sleep_mode(void)
 
 static int text_handle_ship_mode(void)
 {
-	int rc = at_enter_ship_mode_common("TEXT", "phase:text", false);
+	/* Send response BEFORE entering ship mode — power will be cut
+	 * inside at_enter_ship_mode_common() and the function will not
+	 * return on success, so any code after it is unreachable.
+	 */
+	uart_send_line("ship mode");
 
-	if (rc == 0) {
-		uart_send_line("ship mode");
-	}
-
-	return rc;
+	return at_enter_ship_mode_common("TEXT", "phase:text", false);
 }
 
 static int text_handle_mic_capture(const char *seconds_token)

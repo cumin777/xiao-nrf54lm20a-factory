@@ -330,6 +330,14 @@ int main(void)
 
 	update_keywake_boot_state(&g_persist);
 
+	/* Detect ship mode recovery — clear flag so next boot is clean */
+	if ((g_persist.reserved[FACTORY_PERSIST_FLAGS_IDX] &
+	     FACTORY_PERSIST_FLAG_SHIPMODE_ARMED) != 0U) {
+		g_persist.reserved[FACTORY_PERSIST_FLAGS_IDX] &=
+			~FACTORY_PERSIST_FLAG_SHIPMODE_ARMED;
+		(void)factory_storage_save(&g_persist);
+	}
+
 	if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 		debug_send_line("BOOT:path=", "factory_program");
 		run_factory_program();
