@@ -252,6 +252,138 @@ static const struct device *const g_gpio2_dev =
 	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio2));
 static const struct device *const g_gpio3_dev =
 	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(gpio3));
+
+/* ------------------------------------------------------------------ */
+/* Passive buzzer on D0 (gpio1, pin 0) – driven by PWM21 channel 0    */
+/*                                                                    */
+/* FUET-5018 resonant frequency: 4000 Hz                              */
+/* Background mode uses hardware PWM for tone generation and a        */
+/* k_timer to alternate 500 ms ON / 500 ms OFF for mic capture test.  */
+/* Blocking mode uses hardware PWM for standalone AT+BUZZER test.     */
+/* ------------------------------------------------------------------ */
+
+#include <zephyr/drivers/pwm.h>
+
+#define BUZZER_FREQ_HZ      4000U   /* FUET-5018 resonant frequency  */
+#define BUZZER_ON_MS        500U    /* beeping phase duration (ms)   */
+#define BUZZER_OFF_MS       500U    /* silence phase duration (ms)   */
+
+static const struct device *const g_buzzer_pwm_dev =
+	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(pwm21));
+static struct k_timer g_buzzer_rhythm_timer;
+static volatile bool g_buzzer_running;
+
+/*
+ * Rhythm timer callback: alternates between ON and OFF phases.
+ * - ON phase:  PWM drives 4000 Hz 50% duty square wave on D0
+ * - OFF phase: PWM set to 0% duty (pin held low)
+ */
+static void buzzer_rhythm_timer_fn(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+
+	if (!g_buzzer_running || g_buzzer_pwm_dev == NULL) {
+		return;
+	}
+
+	static bool phase_on = true;
+	uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ; /* 250000 ns */
+
+	if (phase_on) {
+		/* Start beeping: set PWM to 50% duty cycle on channel 0 */
+		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, period_ns / 2U, 0U);
+		k_timer_start(timer, K_MSEC(BUZZER_ON_MS), K_NO_WAIT);
+	} else {
+		/* Silence: set PWM to 0 (pin low) */
+		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+		k_timer_start(timer, K_MSEC(BUZZER_OFF_MS), K_NO_WAIT);
+	}
+
+	phase_on = !phase_on;
+}
+
+static void buzzer_rhythm_stop_fn(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	if (g_buzzer_pwm_dev != NULL) {
+		uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ;
+		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+	}
+	g_buzzer_running = false;
+}
+
+static int buzzer_init(void)
+{
+	if (g_buzzer_pwm_dev == NULL || !device_is_ready(g_buzzer_pwm_dev)) {
+		return -ENODEV;
+	}
+
+	uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ;
+	/* Ensure pin starts low */
+	(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+
+	k_timer_init(&g_buzzer_rhythm_timer, buzzer_rhythm_timer_fn,
+		     buzzer_rhythm_stop_fn);
+	g_buzzer_running = false;
+	return 0;
+}
+
+/*
+ * Start background beeping: hardware PWM at 4000 Hz with 500ms on/off rhythm.
+ * The buzzer runs asynchronously so the caller can do other work
+ * (e.g. DMIC capture) while the buzzer is active.
+ */
+static int buzzer_bg_start(void)
+{
+	if (g_buzzer_pwm_dev == NULL || !device_is_ready(g_buzzer_pwm_dev)) {
+		return -ENODEV;
+	}
+
+	if (g_buzzer_running) {
+		k_timer_stop(&g_buzzer_rhythm_timer);
+		g_buzzer_running = false;
+	}
+
+	g_buzzer_running = true;
+	/* Kick off the rhythm timer — first callback fires immediately */
+	k_timer_start(&g_buzzer_rhythm_timer, K_NO_WAIT, K_NO_WAIT);
+	return 0;
+}
+
+static void buzzer_bg_stop(void)
+{
+	k_timer_stop(&g_buzzer_rhythm_timer);
+	if (g_buzzer_pwm_dev != NULL) {
+		uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ;
+		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+	}
+	g_buzzer_running = false;
+}
+
+/*
+ * Blocking beep using hardware PWM at 4000 Hz.
+ * Suitable for standalone buzzer tests where no concurrent work is needed.
+ */
+static int buzzer_beep(uint32_t duration_ms)
+{
+	if (g_buzzer_pwm_dev == NULL || !device_is_ready(g_buzzer_pwm_dev)) {
+		return -ENODEV;
+	}
+
+	if (duration_ms == 0U) {
+		duration_ms = 500U;
+	}
+
+	uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ; /* 250000 ns = 250 us */
+
+	/* 50% duty cycle — drives 4000 Hz square wave */
+	(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, period_ns / 2U, 0U);
+	k_msleep(duration_ms);
+	(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+
+	return 0;
+}
+
 static const struct device *const g_uart20_dev =
 	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(uart20));
 
@@ -2455,7 +2587,13 @@ static int at_handle_micamp(void)
 	struct mic_capture_stats stats = { 0 };
 	int rc;
 
+	/* Start buzzer so the microphone has an audible signal to capture. */
+	(void)buzzer_bg_start();
+
 	rc = at_capture_mic_stats(0U, &stats);
+
+	buzzer_bg_stop();
+
 	if (rc != 0) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_read_failed",
 			      "err:HW_NOT_READY");
@@ -2470,7 +2608,23 @@ static int at_handle_micamp(void)
 	uart_send_u32(stats.sample_count);
 	uart_send_str(";rate:");
 	uart_send_u32(CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ);
-	uart_send_line(";mode:single_block;discard:first_block");
+	uart_send_line(";mode:single_block;discard:first_block;buzzer:4000Hz_500on/500off");
+	return 0;
+}
+
+static int at_handle_buzzer(void)
+{
+	int rc;
+
+	rc = buzzer_beep(500U);
+	if (rc != 0) {
+		emit_testdata("STATE4", "BUZZER", "0", "bool", "buzzer_init_failed",
+			      "err:HW_NOT_READY");
+		return -ENODEV;
+	}
+
+	uart_send_str("+TESTDATA:STATE4,ITEM=BUZZER,VALUE=1,UNIT=bool,RAW=4000");
+	uart_send_str(",META=freq:4000;duration_ms:500;pin:D0\r\n");
 	return 0;
 }
 
@@ -2876,6 +3030,7 @@ static const struct at_cmd g_item_cmds[] = {
 	{ "AT+NFCLOOP", at_handle_nfcloop },
 	{ "AT+IMU6D", at_handle_imu6d },
 	{ "AT+MICAMP", at_handle_micamp },
+	{ "AT+BUZZER", at_handle_buzzer },
 	{ "AT+SLEEPI", at_handle_sleepi },
 	{ "AT+KEYWAKE", at_handle_keywake },
 	{ "AT+FLASHWRITE", at_handle_flashwrite },
@@ -2901,11 +3056,11 @@ static const struct at_cmd g_state_cmds[] = {
 static int at_handle_help(void)
 {
 	uart_send_line("+CMDS:text:help,gpio set/get,bt init,bt scan on/off,sleep mode,ship mode");
-	uart_send_line("+CMDS:text:mic capture <sec>,imu get/off,flash <0-255>,bat get,uart20 on");
+	uart_send_line("+CMDS:text:mic capture <sec>,buzzer <ms>,imu get/off,flash <0-255>,bat get,uart20 on");
 	uart_send_line("+CMDS:AT,AT+HELP,AT+FLASH?,AT+FLASH=<0|1|2>,AT+THRESH?");
 	uart_send_line("+CMDS:AT+STATE1..AT+STATE7,AT+STATE8A,AT+STATE8B,AT+STATE9B");
 	uart_send_line("+CMDS:AT+VBUS,AT+V3P3,AT+UARTLOOP,AT+UART20TEST,AT+CHGCUR,AT+BATV");
-	uart_send_line("+CMDS:AT+BLESCAN,AT+GPIOLOOP,AT+NFCLOOP,AT+IMU6D,AT+MICAMP");
+	uart_send_line("+CMDS:AT+BLESCAN,AT+GPIOLOOP,AT+NFCLOOP,AT+IMU6D,AT+MICAMP,AT+BUZZER");
 	uart_send_line("+CMDS:AT+SLEEPI,AT+KEYWAKE,AT+FLASHWRITE,AT+SHIPMODEA,AT+VBUS_B,AT+V3P3_B,AT+SHIPMODEB");
 	return 0;
 }
@@ -3196,6 +3351,27 @@ static int text_handle_ship_mode(void)
 	return at_enter_ship_mode_common("TEXT", "phase:text", false);
 }
 
+static int text_handle_buzzer(const char *ms_token)
+{
+	uint32_t duration_ms = 0U;
+	int rc;
+
+	if (!parse_u32_token(ms_token, &duration_ms)) {
+		return -EINVAL;
+	}
+
+	rc = buzzer_beep(duration_ms);
+	if (rc != 0) {
+		uart_send_line("buzzer error");
+		return rc;
+	}
+
+	uart_send_str("buzzer ");
+	uart_send_u32(duration_ms);
+	uart_send_line("ms");
+	return 0;
+}
+
 static int text_handle_mic_capture(const char *seconds_token)
 {
 	struct mic_capture_stats stats = { 0 };
@@ -3206,7 +3382,12 @@ static int text_handle_mic_capture(const char *seconds_token)
 		return -EINVAL;
 	}
 
+	(void)buzzer_bg_start();
+
 	rc = at_capture_mic_stats(seconds, &stats);
+
+	buzzer_bg_stop();
+
 	if (rc != 0) {
 		return rc;
 	}
@@ -3405,6 +3586,11 @@ static int dispatch_text_command(char *cmd_buf)
 		return text_handle_mic_capture(argv[2]);
 	}
 
+	if (argc == 2 && strcmp(argv[0], "buzzer") == 0) {
+		debug_send_line("PARSE:text_match=", "buzzer");
+		return text_handle_buzzer(argv[1]);
+	}
+
 	if (argc == 2 && strcmp(argv[0], "imu") == 0 &&
 	    strcmp(argv[1], "get") == 0) {
 		debug_send_line("PARSE:text_match=", "imu get");
@@ -3474,6 +3660,7 @@ void at_handler_init(const struct device *uart_dev,
 	k_work_init_delayable(&g_ble_text_scan_report_work,
 			      at_ble_text_scan_report_work_handler);
 #endif
+	(void)buzzer_init();
 }
 
 void at_handler_early_init(void)
