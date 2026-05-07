@@ -254,29 +254,10 @@ static void update_keywake_boot_state(struct factory_persist *persist)
 
 static void run_factory_program(void)
 {
-	const struct uart_config factory_uart_cfg = {
-		.baudrate = 115200,
-		.parity = UART_CFG_PARITY_NONE,
-		.stop_bits = UART_CFG_STOP_BITS_1,
-		.data_bits = UART_CFG_DATA_BITS_8,
-		.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
-	};
-
-	(void)uart_configure(uart_dev, &factory_uart_cfg);
-
-	while (1) {
-		if (g_led_ready) {
-			(void)gpio_pin_set_dt(&led, 1);
-		}
-		uart_send_line("XIAO nRF54LM20A Demo, LED ON");
-		k_msleep(1000);
-
-		if (g_led_ready) {
-			(void)gpio_pin_set_dt(&led, 0);
-		}
-		uart_send_line("XIAO nRF54LM20A Demo, LED OFF");
-		k_msleep(1000);
-	}
+	uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
+	uart_send_line("UART: UART21 @ 115200");
+	uart_send_line("Use text commands or legacy AT+HELP");
+	uart_send_line("====================================");
 }
 
 int main(void)
@@ -341,17 +322,19 @@ int main(void)
 	if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 		debug_send_line("BOOT:path=", "factory_program");
 		run_factory_program();
-	}
+	} else {
+		debug_send_line("BOOT:path=", "command_loop");
 
-	debug_send_line("BOOT:path=", "command_loop");
+		uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
+		uart_send_line("UART: UART21 @ 115200");
+		uart_send_line("Use text commands or legacy AT+HELP");
+		uart_send_line("====================================");
+	}
 
 	at_handler_init(uart_dev, regulator_parent, &g_persist);
 	at_handler_early_init();
 
-	uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
-	uart_send_line("UART: UART21 @ 115200");
-	uart_send_line("Use text commands or legacy AT+HELP");
-	uart_send_line("====================================");
+	bool factory_blink_on = false;
 
 	while (1) {
 		bool handled_uart = false;
@@ -369,6 +352,28 @@ int main(void)
 
 		if (!handled_uart) {
 			k_usleep(100);
+		}
+
+		/* Factory mode: blink LED and print status every 1 second */
+		if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
+			static int64_t last_blink_ms;
+
+			if (last_blink_ms == 0) {
+				last_blink_ms = k_uptime_get();
+			}
+
+			if ((k_uptime_get() - last_blink_ms) >= 1000) {
+				last_blink_ms = k_uptime_get();
+				factory_blink_on = !factory_blink_on;
+
+				if (g_led_ready) {
+					(void)gpio_pin_set_dt(&led,
+							      factory_blink_on ? 1 : 0);
+				}
+				uart_send_line(factory_blink_on
+					       ? "XIAO nRF54LM20A Demo, LED ON"
+					       : "XIAO nRF54LM20A Demo, LED OFF");
+			}
 		}
 	}
 
