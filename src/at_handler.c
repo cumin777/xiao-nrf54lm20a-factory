@@ -265,8 +265,10 @@ static const struct device *const g_gpio3_dev =
 #include <zephyr/drivers/pwm.h>
 
 #define BUZZER_FREQ_HZ      4000U   /* FUET-5018 resonant frequency  */
-#define BUZZER_ON_MS        500U    /* beeping phase duration (ms)   */
-#define BUZZER_OFF_MS       500U    /* silence phase duration (ms)   */
+#define BUZZER_ON_MS        200U    /* beeping phase duration (ms)   */
+#define BUZZER_OFF_MS       200U    /* silence phase duration (ms)   */
+#define BUZZER_LED_DEV      g_gpio1_dev
+#define BUZZER_LED_PIN      29U     /* D3 = gpio1 pin 29             */
 
 static const struct device *const g_buzzer_pwm_dev =
 	DEVICE_DT_GET_OR_NULL(DT_NODELABEL(pwm21));
@@ -275,8 +277,8 @@ static volatile bool g_buzzer_running;
 
 /*
  * Rhythm timer callback: alternates between ON and OFF phases.
- * - ON phase:  PWM drives 4000 Hz 50% duty square wave on D0
- * - OFF phase: PWM set to 0% duty (pin held low)
+ * - ON phase:  PWM drives 4000 Hz 50% duty square wave on D0, D2 LED on
+ * - OFF phase: PWM set to 0% duty (pin held low), D2 LED off
  */
 static void buzzer_rhythm_timer_fn(struct k_timer *timer)
 {
@@ -292,10 +294,16 @@ static void buzzer_rhythm_timer_fn(struct k_timer *timer)
 	if (phase_on) {
 		/* Start beeping: set PWM to 50% duty cycle on channel 0 */
 		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, period_ns / 2U, 0U);
+		if (BUZZER_LED_DEV != NULL) {
+			(void)gpio_pin_set(BUZZER_LED_DEV, BUZZER_LED_PIN, 1);
+		}
 		k_timer_start(timer, K_MSEC(BUZZER_ON_MS), K_NO_WAIT);
 	} else {
 		/* Silence: set PWM to 0 (pin low) */
 		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+		if (BUZZER_LED_DEV != NULL) {
+			(void)gpio_pin_set(BUZZER_LED_DEV, BUZZER_LED_PIN, 0);
+		}
 		k_timer_start(timer, K_MSEC(BUZZER_OFF_MS), K_NO_WAIT);
 	}
 
@@ -309,6 +317,9 @@ static void buzzer_rhythm_stop_fn(struct k_timer *timer)
 		uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ;
 		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
 	}
+	if (BUZZER_LED_DEV != NULL) {
+		(void)gpio_pin_set(BUZZER_LED_DEV, BUZZER_LED_PIN, 0);
+	}
 	g_buzzer_running = false;
 }
 
@@ -321,6 +332,12 @@ static int buzzer_init(void)
 	uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ;
 	/* Ensure pin starts low */
 	(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+
+	/* Configure D2 as GPIO output for external LED */
+	if (BUZZER_LED_DEV != NULL && device_is_ready(BUZZER_LED_DEV)) {
+		(void)gpio_pin_configure(BUZZER_LED_DEV, BUZZER_LED_PIN,
+					 GPIO_OUTPUT_INACTIVE);
+	}
 
 	k_timer_init(&g_buzzer_rhythm_timer, buzzer_rhythm_timer_fn,
 		     buzzer_rhythm_stop_fn);
@@ -356,6 +373,9 @@ static void buzzer_bg_stop(void)
 	if (g_buzzer_pwm_dev != NULL) {
 		uint32_t period_ns = 1000000000U / BUZZER_FREQ_HZ;
 		(void)pwm_set(g_buzzer_pwm_dev, 0U, period_ns, 0U, 0U);
+	}
+	if (BUZZER_LED_DEV != NULL) {
+		(void)gpio_pin_set(BUZZER_LED_DEV, BUZZER_LED_PIN, 0);
 	}
 	g_buzzer_running = false;
 }
@@ -2608,7 +2628,7 @@ static int at_handle_micamp(void)
 	uart_send_u32(stats.sample_count);
 	uart_send_str(";rate:");
 	uart_send_u32(CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ);
-	uart_send_line(";mode:single_block;discard:first_block;buzzer:4000Hz_500on/500off");
+	uart_send_line(";mode:single_block;discard:first_block;buzzer:4000Hz_200on/200off;led2:sync_buzzer");
 	return 0;
 }
 
