@@ -2717,6 +2717,26 @@ static int at_prepare_sleepi(bool emit_testdata_line)
 	}
 #endif
 
+#if DT_NODE_EXISTS(DT_ALIAS(dmic20))
+	/* Stop DMIC capture and disable its power regulators to release
+	 * PDM/clock resources before system off.  Without this the DMIC
+	 * hardware stays powered and draws significant current in sleep.
+	 */
+	(void)dmic_trigger(g_dmic_dev, DMIC_TRIGGER_STOP);
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(dmic_vdd))
+	if (device_is_ready(g_dmic_vdd_dev)) {
+		(void)regulator_disable(g_dmic_vdd_dev);
+	}
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(power_en))
+	if (device_is_ready(g_power_en_dev)) {
+		(void)regulator_disable(g_power_en_dev);
+	}
+#endif
+
 	rc = at_sleepi_suspend_external_flash();
 	if (rc != 0) {
 		g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] = old_flags;
