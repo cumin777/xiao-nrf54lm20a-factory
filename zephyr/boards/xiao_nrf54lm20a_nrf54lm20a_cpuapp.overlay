@@ -2,6 +2,23 @@
 	status = "okay";
 };
 
+/*
+ * Disable NFC Tag peripheral so that P1.01 / P1.02 (NFC1 / NFC2)
+ * can be reclaimed as normal GPIO pins for the factory loopback test.
+ */
+&nfct {
+	status = "disabled";
+};
+
+/*
+ * Disable I2C22 (XIAO I2C) so that P1.03 (SDA) / P1.07 (SCL)
+ * can be reclaimed as normal GPIO pins for the factory loopback test.
+ * TWIM holds SDA/SCL HIGH in idle, preventing GPIO control.
+ */
+&i2c22 {
+	status = "disabled";
+};
+
 &uart21 {
 	current-speed = <115200>;
 	status = "okay";
