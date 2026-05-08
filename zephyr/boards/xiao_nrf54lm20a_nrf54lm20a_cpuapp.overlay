@@ -49,7 +49,6 @@
 		imu_vdd: dmic_vdd: LDO1 {
 			regulator-min-microvolt = <3300000>;
 			regulator-max-microvolt = <3300000>;
-			regulator-boot-on;
 		};
 	};
 };

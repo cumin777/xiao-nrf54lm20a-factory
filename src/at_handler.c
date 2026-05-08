@@ -19,10 +19,13 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/spinlock.h>
 #include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
+
+#include <nrfx_pdm.h>
 
 #include "factory_storage.h"
 
@@ -1719,6 +1722,63 @@ static int at_enable_dmic_power(void)
 	return 0;
 }
 
+#if DT_NODE_EXISTS(DT_ALIAS(dmic20))
+PINCTRL_DT_DEFINE(DT_ALIAS(dmic20));
+
+/* Fully shut down the DMIC/PDM peripheral and cut power rails.
+ *
+ * The Zephyr dmic_nrfx_pdm driver does not implement pm_action_handler,
+ * so pm_device_action_run(SUSPEND/TURN_OFF) has no effect.  This function
+ * performs the complete shutdown sequence manually:
+ *   1. Stop any ongoing PDM transfer
+ *   2. Uninitialise the nrfx PDM driver (disables peripheral + pins)
+ *   3. Apply pinctrl sleep state (low-power-enable on CLK/DIN pins)
+ *   4. Disable NPM1300 LDO1 (dmic_vdd) via regulator API
+ *   5. Force power_en GPIO LOW to physically cut DMIC power
+ */
+static void at_shutdown_dmic(void)
+{
+	/* 1. Stop PDM transfer */
+	(void)dmic_trigger(g_dmic_dev, DMIC_TRIGGER_STOP);
+	k_msleep(2);
+
+	/* 2. Uninitialise nrfx PDM — disables peripheral and reverts pins */
+	{
+		const nrfx_pdm_t pdm20_inst = NRFX_PDM_INSTANCE(20);
+
+		nrfx_pdm_uninit(&pdm20_inst);
+	}
+
+	/* 3. Apply pinctrl sleep state (disconnects pin input buffers for
+	 *    minimal leakage, using the pdm20_sleep state already defined
+	 *    in the board-level DTS with low-power-enable).
+	 */
+	{
+		const struct pinctrl_dev_config *pcfg =
+			PINCTRL_DT_DEV_CONFIG_GET(DT_ALIAS(dmic20));
+
+		(void)pinctrl_apply_state(pcfg, PINCTRL_STATE_SLEEP);
+	}
+
+	/* 4. Disable PMIC LDO1 (dmic_vdd) */
+#if DT_NODE_EXISTS(DT_NODELABEL(dmic_vdd))
+	if (device_is_ready(g_dmic_vdd_dev)) {
+		(void)regulator_disable(g_dmic_vdd_dev);
+	}
+#endif
+
+	/* 5. Force power_en LOW (GPIO1 pin 12).
+	 * Without regulator-boot-on the refcnt should reach 0 naturally,
+	 * but we drive the pin LOW as a safeguard.
+	 */
+#if DT_NODE_EXISTS(DT_NODELABEL(power_en))
+	if (device_is_ready(g_gpio1_dev)) {
+		(void)gpio_pin_configure(g_gpio1_dev, 12, GPIO_OUTPUT_LOW);
+	}
+#endif
+}
+#endif /* DT_NODE_EXISTS(DT_ALIAS(dmic20)) */
+
 static int at_pmic_charger_fetch(struct sensor_value *avg_current,
 				 struct sensor_value *bat_voltage,
 				 struct sensor_value *chg_status)
@@ -2718,24 +2778,36 @@ static int at_prepare_sleepi(bool emit_testdata_line)
 #endif
 
 #if DT_NODE_EXISTS(DT_ALIAS(dmic20))
-	/* Stop DMIC capture and disable its power regulators to release
-	 * PDM/clock resources before system off.  Without this the DMIC
-	 * hardware stays powered and draws significant current in sleep.
-	 */
-	(void)dmic_trigger(g_dmic_dev, DMIC_TRIGGER_STOP);
+	at_shutdown_dmic();
 #endif
 
-#if DT_NODE_EXISTS(DT_NODELABEL(dmic_vdd))
-	if (device_is_ready(g_dmic_vdd_dev)) {
-		(void)regulator_disable(g_dmic_vdd_dev);
+	/* --- IMU: cancel reports, stop trigger stream, disable power --- */
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	atomic_set(&g_imu_text_report_active, 0);
+	(void)k_work_cancel_delayable(&g_imu_text_report_work);
+
+#ifdef CONFIG_LSM6DSL_TRIGGER
+	if (atomic_get(&g_imu_stream_started)) {
+		struct sensor_trigger trig = {
+			.type = SENSOR_TRIG_DATA_READY,
+			.chan = SENSOR_CHAN_ACCEL_XYZ,
+		};
+		(void)sensor_trigger_set(g_imu_dev, &trig, NULL);
+		atomic_set(&g_imu_stream_started, 0);
+	}
+#endif
+#endif
+
+#if DT_NODE_EXISTS(DT_NODELABEL(imu_vdd))
+	if (device_is_ready(g_imu_vdd_dev)) {
+		(void)regulator_disable(g_imu_vdd_dev);
 	}
 #endif
 
-#if DT_NODE_EXISTS(DT_NODELABEL(power_en))
-	if (device_is_ready(g_power_en_dev)) {
-		(void)regulator_disable(g_power_en_dev);
+	/* --- Buzzer: stop PWM rhythm and silence output --- */
+	if (g_buzzer_running) {
+		buzzer_bg_stop();
 	}
-#endif
 
 	rc = at_sleepi_suspend_external_flash();
 	if (rc != 0) {
