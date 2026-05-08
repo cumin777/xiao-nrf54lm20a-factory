@@ -3,6 +3,15 @@
 };
 
 /*
+ * Release NFC pads P1.01 / P1.02 as normal GPIO.
+ * This sets NFCT->PADCONFIG.ENABLE = Disabled in SystemInit(),
+ * disconnecting the NFC antenna and allowing GPIO control.
+ */
+&uicr {
+	nfct-pins-as-gpios;
+};
+
+/*
  * Disable NFC Tag peripheral so that P1.01 / P1.02 (NFC1 / NFC2)
  * can be reclaimed as normal GPIO pins for the factory loopback test.
  */
