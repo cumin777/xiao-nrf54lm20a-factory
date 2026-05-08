@@ -2695,6 +2695,28 @@ static int at_prepare_sleepi(bool emit_testdata_line)
 		return -EIO;
 	}
 
+#if defined(CONFIG_BT)
+	/* Stop any active BLE scan and fully deinitialize the Bluetooth
+	 * subsystem to release all radio/clock resources before system off.
+	 * Without this, the BLE stack retains hardware resources and causes
+	 * significantly higher sleep current.
+	 */
+	if (g_ble_text_scan_active || g_ble_text_scan_pending) {
+		(void)at_ble_scan_stop_session(NULL, 0, NULL, NULL, 0, NULL,
+					       NULL, NULL);
+	}
+
+	if (g_ble_initialized) {
+		rc = bt_disable();
+		if (rc != 0 && rc != -EALREADY) {
+			ble_trace_rc("sleepi:bt_disable_failed", rc);
+		} else {
+			g_ble_initialized = false;
+			ble_trace_line("sleepi:bt_disabled");
+		}
+	}
+#endif
+
 	rc = at_sleepi_suspend_external_flash();
 	if (rc != 0) {
 		g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] = old_flags;
