@@ -431,9 +431,9 @@ int main(void)
 					(void)gpio_pin_set_dt(&led,
 							      factory_blink_on ? 1 : 0);
 				}
-				uart_send_line(factory_blink_on
-					       ? "XIAO nRF54LM20A Demo, LED ON"
-					       : "XIAO nRF54LM20A Demo, LED OFF");
+				uart_send_str_dev(uart20_dev, factory_blink_on
+					       ? "XIAO nRF54LM20A Demo, LED ON\r\n"
+					       : "XIAO nRF54LM20A Demo, LED OFF\r\n");
 			}
 		}
 	}
