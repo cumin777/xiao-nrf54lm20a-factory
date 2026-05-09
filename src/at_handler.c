@@ -3588,18 +3588,18 @@ static int text_handle_flash_write(const char *value_token)
 		return -EACCES;
 	}
 
-	old_value = g_ctx.persist->legacy_flash_value;
-	g_ctx.persist->legacy_flash_value = flash_value;
+	old_value = g_ctx.persist->boot_flag;
+	g_ctx.persist->boot_flag = flash_value;
 
 	rc = factory_storage_save(g_ctx.persist);
 	if (rc != 0) {
-		g_ctx.persist->legacy_flash_value = old_value;
+		g_ctx.persist->boot_flag = old_value;
 		return -EIO;
 	}
 
 	rc = factory_storage_load(&verify);
-	if (rc != 0 || verify.legacy_flash_value != flash_value) {
-		g_ctx.persist->legacy_flash_value = old_value;
+	if (rc != 0 || verify.boot_flag != flash_value) {
+		g_ctx.persist->boot_flag = old_value;
 		return -EIO;
 	}
 

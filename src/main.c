@@ -15,6 +15,13 @@
 #define LED_NODE DT_ALIAS(led0)
 #define REGULATOR_PARENT_NODE DT_ALIAS(regulator_parent)
 
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+static const struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+static const struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+#endif
+
 #define CMD_BUF_SIZE 160
 #define CMD_IDLE_FLUSH_MS 80
 
@@ -306,6 +313,40 @@ int main(void)
 		(void)factory_storage_save(&g_persist);
 	}
 
+	/* In factory mode: turn off R/G LEDs, only BLUE blinks.
+	 * Otherwise (pre-factory): set R/G ON for solid white LED.
+	 * LEDs are active-low on XIAO nRF54LM20A:
+	 *   GPIO_OUTPUT_LOW  = ON,  GPIO_OUTPUT_HIGH = OFF
+	 * (DTS says GPIO_ACTIVE_HIGH but hardware is inverted).
+	 */
+	if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+		if (gpio_is_ready_dt(&led1)) {
+			(void)gpio_pin_configure(led1.port, led1.pin,
+						 GPIO_OUTPUT_HIGH);
+		}
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+		if (gpio_is_ready_dt(&led2)) {
+			(void)gpio_pin_configure(led2.port, led2.pin,
+						 GPIO_OUTPUT_HIGH);
+		}
+#endif
+	} else {
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+		if (gpio_is_ready_dt(&led1)) {
+			(void)gpio_pin_configure(led1.port, led1.pin,
+						 GPIO_OUTPUT_LOW);
+		}
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+		if (gpio_is_ready_dt(&led2)) {
+			(void)gpio_pin_configure(led2.port, led2.pin,
+						 GPIO_OUTPUT_LOW);
+		}
+#endif
+	}
+
 	debug_send_u32("BOOT:boot_flag=", g_persist.boot_flag);
 	debug_send_u32("BOOT:led_ready=", g_led_ready ? 1U : 0U);
 
@@ -357,6 +398,26 @@ int main(void)
 		/* Factory mode: blink LED and print status every 1 second */
 		if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 			static int64_t last_blink_ms;
+			static bool factory_rg_off;
+
+			/* Turn off R/G on first entry (handles runtime
+			 * transition from non-factory via "flash 2" command).
+			 */
+			if (!factory_rg_off) {
+				factory_rg_off = true;
+#if DT_NODE_EXISTS(DT_ALIAS(led1))
+				if (gpio_is_ready_dt(&led1)) {
+					(void)gpio_pin_configure(led1.port,
+						led1.pin, GPIO_OUTPUT_HIGH);
+				}
+#endif
+#if DT_NODE_EXISTS(DT_ALIAS(led2))
+				if (gpio_is_ready_dt(&led2)) {
+					(void)gpio_pin_configure(led2.port,
+						led2.pin, GPIO_OUTPUT_HIGH);
+				}
+#endif
+			}
 
 			if (last_blink_ms == 0) {
 				last_blink_ms = k_uptime_get();
