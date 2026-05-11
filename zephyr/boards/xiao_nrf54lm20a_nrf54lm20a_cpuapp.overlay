@@ -59,13 +59,13 @@
  *   will not block charging when no physical NTC is present on the board.
  *   When thermistor_idx == 0 the Zephyr driver sets the DISABLENTC bit in
  *   BCHGDISABLESET (CHGR base 0x03, offset 0x06, bit 1).
- * - Raise charge current to 500 mA (factory test only; adjust per battery).
+ * - Set charge current to 200 mA.
  * - Raise VBUS input limit to 1500 mA so the charger can draw enough current.
  */
 &pmic_charger {
 	thermistor-ohms = <0>;
 	thermistor-beta = <3380>;
-	current-microamp = <500000>;
+	current-microamp = <200000>;
 	vbus-limit-microamp = <1500000>;
 };
 
