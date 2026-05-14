@@ -262,8 +262,8 @@ static void update_keywake_boot_state(struct factory_persist *persist)
 static void run_factory_program(void)
 {
 	if (at_handler_imu_ready()) {
-		uart_send_line("Hello, XIAO nRF54LM20A");
-		at_handler_print_imu_sample();
+		uart_send_str_dev(uart20_dev, "Hello, XIAO nRF54LM20A\r\n");
+		at_handler_print_imu_sample_dev(uart20_dev);
 	} else {
 		uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
 		uart_send_line("UART: UART21 @ 115200");
@@ -448,6 +448,10 @@ int main(void)
 				uart_send_str_dev(uart20_dev, factory_blink_on
 					       ? "XIAO nRF54LM20A Demo, LED ON\r\n"
 					       : "XIAO nRF54LM20A Demo, LED OFF\r\n");
+
+				if (at_handler_imu_ready()) {
+					at_handler_print_imu_sample_dev(uart20_dev);
+				}
 			}
 		}
 	}

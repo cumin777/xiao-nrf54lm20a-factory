@@ -20,5 +20,6 @@ void at_handler_run_deferred_action(void);
 
 bool at_handler_imu_ready(void);
 void at_handler_print_imu_sample(void);
+void at_handler_print_imu_sample_dev(const struct device *uart);
 
 #endif /* AT_HANDLER_H_ */

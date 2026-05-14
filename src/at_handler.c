@@ -3853,6 +3853,91 @@ void at_handler_print_imu_sample(void)
 #endif
 }
 
+static void emit_fixed6_to_dev(const struct device *dev, int64_t micro_value)
+{
+	uint64_t magnitude;
+	uint32_t frac_digits[6];
+	char ch;
+
+	if (dev == NULL) {
+		return;
+	}
+
+	if (micro_value < 0) {
+		uart_poll_out(dev, '-');
+		magnitude = (uint64_t)(-micro_value);
+	} else {
+		magnitude = (uint64_t)micro_value;
+	}
+
+	/* Integer part */
+	{
+		uint32_t int_part = (uint32_t)(magnitude / 1000000ULL);
+		char ibuf[11];
+		int i = 0;
+
+		if (int_part == 0U) {
+			uart_poll_out(dev, '0');
+		} else {
+			while (int_part > 0U) {
+				ibuf[i++] = (char)('0' + (int_part % 10U));
+				int_part /= 10U;
+			}
+			while (i > 0) {
+				uart_poll_out(dev, ibuf[--i]);
+			}
+		}
+	}
+
+	uart_poll_out(dev, '.');
+	magnitude %= 1000000ULL;
+
+	for (int i = 5; i >= 0; --i) {
+		frac_digits[i] = (uint32_t)(magnitude % 10ULL);
+		magnitude /= 10ULL;
+	}
+
+	for (size_t i = 0; i < 6; ++i) {
+		ch = (char)('0' + frac_digits[i]);
+		uart_poll_out(dev, (uint8_t)ch);
+	}
+}
+
+void at_handler_print_imu_sample_dev(const struct device *dev)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	struct sensor_value accel_x, accel_y, accel_z;
+	struct sensor_value gyro_x, gyro_y, gyro_z;
+
+	if (dev == NULL || !device_is_ready(g_imu_dev)) {
+		return;
+	}
+
+	if (at_fetch_imu_sample(&accel_x, &accel_y, &accel_z,
+				&gyro_x, &gyro_y, &gyro_z) != 0) {
+		return;
+	}
+
+	uart_send_str_dev(dev, "accel data:");
+	emit_fixed6_to_dev(dev, sensor_value_to_micro(&accel_x));
+	uart_send_str_dev(dev, ",");
+	emit_fixed6_to_dev(dev, sensor_value_to_micro(&accel_y));
+	uart_send_str_dev(dev, ",");
+	emit_fixed6_to_dev(dev, sensor_value_to_micro(&accel_z));
+	uart_send_str_dev(dev, "\r");
+
+	uart_send_str_dev(dev, "gyro data: ");
+	emit_fixed6_to_dev(dev, sensor_value_to_micro(&gyro_x));
+	uart_send_str_dev(dev, ",");
+	emit_fixed6_to_dev(dev, sensor_value_to_micro(&gyro_y));
+	uart_send_str_dev(dev, ",");
+	emit_fixed6_to_dev(dev, sensor_value_to_micro(&gyro_z));
+	uart_send_str_dev(dev, "\r\n");
+#else
+	ARG_UNUSED(dev);
+#endif
+}
+
 bool at_handler_uart20_service_enabled(void)
 {
 	return g_uart20_test_enabled;
