@@ -3824,6 +3824,35 @@ void at_handler_early_init(void)
 #endif
 }
 
+bool at_handler_imu_ready(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	return device_is_ready(g_imu_dev);
+#else
+	return false;
+#endif
+}
+
+void at_handler_print_imu_sample(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	struct sensor_value accel_x, accel_y, accel_z;
+	struct sensor_value gyro_x, gyro_y, gyro_z;
+
+	if (!device_is_ready(g_imu_dev)) {
+		return;
+	}
+
+	if (at_fetch_imu_sample(&accel_x, &accel_y, &accel_z,
+				&gyro_x, &gyro_y, &gyro_z) != 0) {
+		return;
+	}
+
+	emit_text_imu_sample(&accel_x, &accel_y, &accel_z,
+			     &gyro_x, &gyro_y, &gyro_z);
+#endif
+}
+
 bool at_handler_uart20_service_enabled(void)
 {
 	return g_uart20_test_enabled;

@@ -261,10 +261,15 @@ static void update_keywake_boot_state(struct factory_persist *persist)
 
 static void run_factory_program(void)
 {
-	uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
-	uart_send_line("UART: UART21 @ 115200");
-	uart_send_line("Use text commands or legacy AT+HELP");
-	uart_send_line("====================================");
+	if (at_handler_imu_ready()) {
+		uart_send_line("Hello, XIAO nRF54LM20A");
+		at_handler_print_imu_sample();
+	} else {
+		uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
+		uart_send_line("UART: UART21 @ 115200");
+		uart_send_line("Use text commands or legacy AT+HELP");
+		uart_send_line("====================================");
+	}
 }
 
 int main(void)
@@ -369,6 +374,9 @@ int main(void)
 		(void)factory_storage_save(&g_persist);
 	}
 
+	at_handler_init(uart_dev, regulator_parent, &g_persist);
+	at_handler_early_init();
+
 	if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 		debug_send_line("BOOT:path=", "factory_program");
 		run_factory_program();
@@ -380,9 +388,6 @@ int main(void)
 		uart_send_line("Use text commands or legacy AT+HELP");
 		uart_send_line("====================================");
 	}
-
-	at_handler_init(uart_dev, regulator_parent, &g_persist);
-	at_handler_early_init();
 
 	bool factory_blink_on = false;
 
