@@ -2740,6 +2740,8 @@ static int at_prepare_sleepi(bool emit_testdata_line)
 		  FACTORY_PERSIST_FLAG_KEYWAKE_SW0);
 	g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] |=
 		FACTORY_PERSIST_FLAG_SLEEPI_ARMED;
+	g_ctx.persist->reserved[FACTORY_PERSIST_FLAGS_IDX] |=
+		FACTORY_PERSIST_FLAG_SLEEP_WAKE;
 	g_ctx.persist->reserved[FACTORY_PERSIST_RESET_CAUSE_IDX] = 0U;
 
 	rc = factory_storage_save(g_ctx.persist);

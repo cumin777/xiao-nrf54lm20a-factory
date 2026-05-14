@@ -15,6 +15,7 @@
 #define FACTORY_PERSIST_FLAG_KEYWAKE_LATCHED (1u << 1)
 #define FACTORY_PERSIST_FLAG_KEYWAKE_SW0 (1u << 2)
 #define FACTORY_PERSIST_FLAG_SHIPMODE_ARMED (1u << 3)
+#define FACTORY_PERSIST_FLAG_SLEEP_WAKE (1u << 4)
 
 struct factory_persist {
 	uint32_t magic;

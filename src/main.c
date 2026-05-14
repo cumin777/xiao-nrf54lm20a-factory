@@ -350,6 +350,15 @@ int main(void)
 	debug_send_u32("BOOT:boot_flag=", g_persist.boot_flag);
 	debug_send_u32("BOOT:led_ready=", g_led_ready ? 1U : 0U);
 
+	/* Detect sleep mode wakeup — print log and clear flag */
+	if ((g_persist.reserved[FACTORY_PERSIST_FLAGS_IDX] &
+	     FACTORY_PERSIST_FLAG_SLEEP_WAKE) != 0U) {
+		uart_send_line("BOOT: sleep mode wakeup detected");
+		g_persist.reserved[FACTORY_PERSIST_FLAGS_IDX] &=
+			~FACTORY_PERSIST_FLAG_SLEEP_WAKE;
+		(void)factory_storage_save(&g_persist);
+	}
+
 	update_keywake_boot_state(&g_persist);
 
 	/* Detect ship mode recovery — clear flag so next boot is clean */
