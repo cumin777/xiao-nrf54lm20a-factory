@@ -264,11 +264,6 @@ static void run_factory_program(void)
 	if (at_handler_imu_ready()) {
 		uart_send_str_dev(uart20_dev, "Hello, XIAO nRF54LM20A\r\n");
 		at_handler_print_imu_sample_dev(uart20_dev);
-	} else {
-		uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
-		uart_send_line("UART: UART21 @ 115200");
-		uart_send_line("Use text commands or legacy AT+HELP");
-		uart_send_line("====================================");
 	}
 }
 
@@ -377,16 +372,16 @@ int main(void)
 	at_handler_init(uart_dev, regulator_parent, &g_persist);
 	at_handler_early_init();
 
+	uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
+	uart_send_line("UART: UART21 @ 115200");
+	uart_send_line("Use text commands or legacy AT+HELP");
+	uart_send_line("====================================");
+
 	if (g_persist.boot_flag == FACTORY_BOOT_FLAG_ENTER_FACTORY) {
 		debug_send_line("BOOT:path=", "factory_program");
 		run_factory_program();
 	} else {
 		debug_send_line("BOOT:path=", "command_loop");
-
-		uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
-		uart_send_line("UART: UART21 @ 115200");
-		uart_send_line("Use text commands or legacy AT+HELP");
-		uart_send_line("====================================");
 	}
 
 	bool factory_blink_on = false;
