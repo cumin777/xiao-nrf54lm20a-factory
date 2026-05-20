@@ -7,6 +7,8 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 
+#include <hal/nrf_reset.h>
+
 #include "at_handler.h"
 #include "factory_storage.h"
 
@@ -350,13 +352,16 @@ int main(void)
 	debug_send_u32("BOOT:boot_flag=", g_persist.boot_flag);
 	debug_send_u32("BOOT:led_ready=", g_led_ready ? 1U : 0U);
 
-	/* Detect sleep mode wakeup — print log and clear flag */
-	if ((g_persist.reserved[FACTORY_PERSIST_FLAGS_IDX] &
-	     FACTORY_PERSIST_FLAG_SLEEP_WAKE) != 0U) {
+	/* Detect GPIO button wake from system-off sleep mode.
+	 * RESETREAS.OFF (bit 8) indicates wake by GPIO DETECT signal.
+	 * RESETREAS.RESETPIN (bit 0) indicates wake by RESET pin.
+	 */
+	uint32_t resetreas = nrf_reset_resetreas_get(NRF_RESET);
+
+	if ((resetreas & NRF_RESET_RESETREAS_OFF_MASK) != 0U) {
 		uart_send_line("BOOT: sleep mode wakeup detected");
-		g_persist.reserved[FACTORY_PERSIST_FLAGS_IDX] &=
-			~FACTORY_PERSIST_FLAG_SLEEP_WAKE;
-		(void)factory_storage_save(&g_persist);
+		nrf_reset_resetreas_clear(NRF_RESET,
+					  NRF_RESET_RESETREAS_OFF_MASK);
 	}
 
 	update_keywake_boot_state(&g_persist);
