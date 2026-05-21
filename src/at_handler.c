@@ -186,6 +186,8 @@ static const struct gpio_text_pair_desc g_gpio_text_pairs[] = {
 	{ { { 3, 2 }, { 3, 5 } } },
 	{ { { 3, 3 }, { 1, 1 } } },
 	{ { { 3, 4 }, { 1, 2 } } },
+	/* Buzzer D0 (gpio1 pin 0) <-> External LED D3 (gpio1 pin 29) */
+	{ { { 1, 0 }, { 1, 29 } } },
 };
 
 static struct gpio_text_pair_state g_gpio_text_pair_state[ARRAY_SIZE(g_gpio_text_pairs)];
@@ -2667,12 +2669,7 @@ static int at_handle_micamp(void)
 	struct mic_capture_stats stats = { 0 };
 	int rc;
 
-	/* Start buzzer so the microphone has an audible signal to capture. */
-	(void)buzzer_bg_start();
-
 	rc = at_capture_mic_stats(0U, &stats);
-
-	buzzer_bg_stop();
 
 	if (rc != 0) {
 		emit_testdata("STATE4", "MICAMP", "0", "abs16", "dmic_read_failed",
@@ -2688,7 +2685,7 @@ static int at_handle_micamp(void)
 	uart_send_u32(stats.sample_count);
 	uart_send_str(";rate:");
 	uart_send_u32(CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ);
-	uart_send_line(";mode:single_block;discard:first_block;buzzer:4000Hz_200on/200off;led2:sync_buzzer");
+	uart_send_line(";mode:single_block;discard:first_block");
 	return 0;
 }
 
@@ -3516,11 +3513,7 @@ static int text_handle_mic_capture(const char *seconds_token)
 		return -EINVAL;
 	}
 
-	(void)buzzer_bg_start();
-
 	rc = at_capture_mic_stats(seconds, &stats);
-
-	buzzer_bg_stop();
 
 	if (rc != 0) {
 		return rc;
