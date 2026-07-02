@@ -47,8 +47,16 @@
 };
 
 &pmic {
+	pmic_leds: leds {
+		compatible = "nordic,npm1300-led";
+		nordic,led0-mode = "error";
+		nordic,led1-mode = "host";
+		nordic,led2-mode = "host";
+	};
+
 	regulators {
 		imu_vdd: dmic_vdd: LDO1 {
+			/delete-property/ regulator-boot-on;
 			regulator-init-microvolt = <3300000>;
 			regulator-min-microvolt = <3300000>;
 			regulator-max-microvolt = <3300000>;
