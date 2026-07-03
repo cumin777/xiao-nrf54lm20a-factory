@@ -58,22 +58,13 @@ config FACTORY_BATV_DELTA_MAX_MV
 	help
 	  Host-side reference delta for BATV checks (firmware does not judge PASS/FAIL).
 
-config FACTORY_CHARGE_LED
-	bool "Drive nPM1300 LED1 as a host-controlled charging indicator"
+config FACTORY_STATUS_LED
+	bool "Drive nPM1300 LED1 as a host-controlled factory status indicator"
 	default y
 	help
-	  Poll nPM1300 BCHGCHARGESTATUS and VBAT, then drive nPM1300 LED1 from
-	  firmware. This is intended for nPM1300 D00, where hardware charging
-	  indication alone does not prove that a battery is physically present.
-
-config FACTORY_CHARGE_LED_BAT_PRESENT_MIN_MV
-	int "Minimum VBAT for charge LED battery-present check (mV)"
-	range 0 5000
-	default 2500
-	depends on FACTORY_CHARGE_LED
-	help
-	  VBAT threshold used before allowing LED1 to show charging. Set to 0 to
-	  disable the VBAT gate and mirror only BCHGCHARGESTATUS charging bits.
+	  Configure nPM1300 LED1 as a HOST-controlled LED and use it to show
+	  factory status: ON while the persisted flash flag is not 2, OFF after
+	  the flag is set to 2.
 
 config FACTORY_SLEEPI_WINDOW_MS
 	int "State5 host current measurement window hint (ms)"

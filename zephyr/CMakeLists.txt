@@ -7,6 +7,6 @@ project(factory_test)
 target_sources(app PRIVATE
 	../src/main.c
 	../src/at_handler.c
-	../src/charge_led.c
+	../src/factory_status_led.c
 	../src/factory_storage.c
 )
