@@ -107,6 +107,8 @@
 #define FACTORY_UART20_BUF_SIZE 32
 #define FACTORY_IMU_FIRST_SAMPLE_WAIT_MS 200
 #define FACTORY_IMU_REPORT_PERIOD_MS 500
+#define FACTORY_DMIC_MIN_VALID_PEAK_ABS 1
+#define FACTORY_DMIC_MAX_FLAT_RUN_SAMPLES 256
 #define FACTORY_BLE_TOP_DEVICE_COUNT 5
 #define FACTORY_BLE_TRACKED_DEVICE_MAX 128
 #define FACTORY_BLE_REPORT_PERIOD_MS 500
@@ -2656,6 +2658,12 @@ static int at_capture_mic_stats(uint32_t sample_seconds,
 	stats->avg_abs = (int32_t)(sum_abs / total_samples);
 	stats->min_sample = min_sample;
 	stats->max_sample = max_sample;
+
+	if (stats->peak_abs < FACTORY_DMIC_MIN_VALID_PEAK_ABS ||
+	    stats->max_consecutive >= FACTORY_DMIC_MAX_FLAT_RUN_SAMPLES) {
+		return -ENODATA;
+	}
+
 	return 0;
 #else
 	ARG_UNUSED(sample_seconds);
@@ -2687,6 +2695,38 @@ static int at_handle_micamp(void)
 	uart_send_u32(CONFIG_FACTORY_DMIC_SAMPLE_RATE_HZ);
 	uart_send_line(";mode:single_block;discard:first_block");
 	return 0;
+}
+
+static bool at_probe_imu_ready(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(imu0))
+	int rc;
+
+	rc = at_ensure_imu_ready();
+	if (rc != 0) {
+		return false;
+	}
+
+	rc = at_start_imu_stream_if_needed();
+	if (rc != 0) {
+		return false;
+	}
+
+	return device_is_ready(g_imu_dev);
+#else
+	return false;
+#endif
+}
+
+static bool at_probe_dmic_ready(void)
+{
+#if DT_NODE_EXISTS(DT_ALIAS(dmic20))
+	struct mic_capture_stats stats = { 0 };
+
+	return at_capture_mic_stats(0U, &stats) == 0;
+#else
+	return false;
+#endif
 }
 
 static int at_handle_buzzer(void)
@@ -3529,6 +3569,24 @@ static int text_handle_mic_capture(const char *seconds_token)
 	return 0;
 }
 
+static int text_handle_who(void)
+{
+	bool imu_ready = at_probe_imu_ready();
+	bool dmic_ready = at_probe_dmic_ready();
+
+	if (imu_ready && dmic_ready) {
+		uart_send_line("issensor");
+	} else if (!imu_ready && !dmic_ready) {
+		uart_send_line("nosensor");
+	} else if (!imu_ready) {
+		uart_send_line("noimu");
+	} else {
+		uart_send_line("nodmic");
+	}
+
+	return 0;
+}
+
 static int text_handle_imu_get(void)
 {
 #if DT_NODE_EXISTS(DT_ALIAS(imu0))
@@ -3657,6 +3715,11 @@ static int dispatch_text_command(char *cmd_buf)
 	if (argc == 1 && strcmp(argv[0], "help") == 0) {
 		debug_send_line("PARSE:text_match=", "help");
 		return at_handle_help();
+	}
+
+	if (argc == 1 && strcmp(argv[0], "who?") == 0) {
+		debug_send_line("PARSE:text_match=", "who?");
+		return text_handle_who();
 	}
 
 	if (argc == 5 && strcmp(argv[0], "gpio") == 0 &&
