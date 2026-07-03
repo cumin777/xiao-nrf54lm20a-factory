@@ -10,7 +10,7 @@
 #include <hal/nrf_reset.h>
 
 #include "at_handler.h"
-#include "charge_led.h"
+#include "factory_status_led.h"
 #include "factory_storage.h"
 
 #define UART_NODE DT_NODELABEL(uart21)
@@ -377,7 +377,8 @@ int main(void)
 
 	at_handler_init(uart_dev, regulator_parent, &g_persist);
 	at_handler_early_init();
-	charge_led_init();
+	factory_status_led_init();
+	factory_status_led_update(g_persist.boot_flag);
 
 	uart_send_line("=== XIAO nRF54LM20A Factory UART V3 ===");
 	uart_send_line("UART: UART21 @ 115200");
@@ -406,7 +407,7 @@ int main(void)
 		}
 
 		at_handler_poll_background();
-		charge_led_poll();
+		factory_status_led_update(g_persist.boot_flag);
 
 		if (!handled_uart) {
 			k_usleep(100);
